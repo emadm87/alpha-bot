@@ -11,10 +11,7 @@ import {
   users,
   type Account,
 } from '../db/schema.js'
-import {
-  calcPositionsMarketValue,
-  calcPositionsValue,
-} from '../services/assetCalculator.js'
+import { calcPositionsMarketValue } from '../services/assetCalculator.js'
 import { getKlineData, type Kline } from '../services/marketData.js'
 import { resetAutoTradingJob } from '../services/scheduler.js'
 import { getLogger } from '../utils/logger.js'
@@ -79,7 +76,7 @@ accountRoutes.get('/overview', async (c) => {
       throw new HTTPException(404, { message: 'No active account found' })
     }
 
-    const positionsValue = (await calcPositionsValue(account.id)) || 0.0
+    const positionsValue = (await calcPositionsMarketValue(account.id)) || 0.0
     const positionsCount = db
       .select()
       .from(positionsTable)
@@ -455,7 +452,7 @@ accountRoutes.get('/:accountId/overview', async (c) => {
 
     if (!account) throw new HTTPException(404, { message: 'Account not found' })
 
-    const positionsValue = (await calcPositionsValue(account.id)) || 0.0
+    const positionsValue = (await calcPositionsMarketValue(account.id)) || 0.0
 
     const positionsCount = db
       .select()

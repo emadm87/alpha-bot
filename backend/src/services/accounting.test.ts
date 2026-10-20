@@ -153,6 +153,14 @@ describe('E5 — unrealised P&L of SHORT positions (calcPositionsMarketValue)', 
     approxEqual(await calcPositionsMarketValue(acc.id), 40, 'SHORT 2x @100, price 110')
   })
 
+  test('LONG 2x entry 100, price rises to 110 -> margin 50 + profit 10 = 60', async () => {
+    const acc = createAccount(950)
+    createPosition(acc.id, { symbol: 'LTC', side: 'LONG', quantity: 1, avgCost: 100, leverage: 2 })
+    cachePrice('LTC', 'CRYPTO', 110)
+
+    approxEqual(await calcPositionsMarketValue(acc.id), 60, 'LONG 2x @100, price 110')
+  })
+
   test('SHORT 1x entry 100, price falls to 90 -> equity 100 + 10 = 110', async () => {
     const acc = createAccount(900)
     createPosition(acc.id, { symbol: 'DOGE', side: 'SHORT', quantity: 1, avgCost: 100, leverage: 1 })
