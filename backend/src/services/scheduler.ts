@@ -364,9 +364,10 @@ export class TaskScheduler {
       }
     }
 
-    // Equity: cash + unrealised PnL
-    const equity = account.currentCash + totalPnl
+    // Equity: cash + posted margin + unrealised PnL. Cash already had the
+    // margin deducted on open, so it must be added back here.
     const marginUsed = account.marginUsed
+    const equity = account.currentCash + marginUsed + totalPnl
 
     if (marginUsed <= 0) return // No margin used, nothing to check
 

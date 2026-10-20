@@ -178,6 +178,11 @@ async function runScenario(t: TestContext, s: Scenario) {
   )
 
   assert.ok(report, 'monitor must have evaluated the account')
+  // The log line rounds to 2 decimals.
+  assert.ok(
+    Math.abs(report.equity - correctEquity) <= 0.005 + EPS,
+    `monitor equity: actual=${report.equity} expected=${correctEquity.toFixed(4)}`,
+  )
   return { acc, correctEquity, correctLevel, report, liq, pos }
 }
 
