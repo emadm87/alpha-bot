@@ -92,6 +92,17 @@ export async function placeAndExecuteCrypto(params: {
   const takerFee = calcCryptoFee(notional)
 
   return db.transaction((tx) => {
+    // Authoritative balances: re-read inside the transaction so a stale
+    // `account` object from the caller cannot overwrite newer cash/margin.
+    const freshAccount = tx
+      .select()
+      .from(accounts)
+      .where(eq(accounts.id, account.id))
+      .get()
+    if (!freshAccount) {
+      throw new Error(`Account ${account.id} not found`)
+    }
+
     const order = tx
       .insert(orders)
       .values({
@@ -125,8 +136,8 @@ export async function placeAndExecuteCrypto(params: {
       )
       .get()
 
-    let currentCash = account.currentCash
-    let marginUsed = account.marginUsed
+    let currentCash = freshAccount.currentCash
+    let marginUsed = freshAccount.marginUsed
     let interestCharged = 0
 
     if (side === 'LONG' || side === 'SHORT') {

@@ -353,3 +353,15 @@ describe('E9-E — two orders started concurrently, each with a freshly read acc
     approxEqual(acc.marginUsed, OPEN_EXPECTED_MARGIN, 'margin_used')
   })
 })
+
+describe('E9-F — account deleted after the caller read it (Task 003L)', () => {
+  test('order is rejected and no order or trade is recorded', async () => {
+    const snapshot = createAccount()
+    db.delete(accounts).where(eq(accounts.id, snapshot.id)).run()
+    cachePrice('FIL', 'CRYPTO', 100)
+    await assert.rejects(exec(snapshot, 'FIL', 'LONG', 1, 2), /Account .* not found/)
+    assert.equal(ordersOf(snapshot.id).length, 0, 'no order recorded')
+    assert.equal(tradesOf(snapshot.id).length, 0, 'no trade recorded')
+    assert.equal(positionOf(snapshot.id, 'FIL'), undefined, 'no position created')
+  })
+})
