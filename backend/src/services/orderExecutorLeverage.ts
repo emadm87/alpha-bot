@@ -48,6 +48,8 @@ function calculatePositionInterest(position: Position): number {
  *             'BUY' (close short) / 'SELL' (close long)
  * @param leverage Leverage multiplier (1 = spot, 2-50 = leveraged)
  * @param quantity Amount in base currency (e.g. BTC amount for BTC/USDT)
+ * @param orderNo Optional order number (e.g. 'LIQ-…' for liquidations);
+ *                a random one is generated when omitted
  */
 export async function placeAndExecuteCrypto(params: {
   account: Account
@@ -58,6 +60,7 @@ export async function placeAndExecuteCrypto(params: {
   price: number | null
   quantity: number
   leverage?: number
+  orderNo?: string
 }): Promise<Order> {
   const {
     account,
@@ -67,6 +70,7 @@ export async function placeAndExecuteCrypto(params: {
     price,
     quantity,
     leverage = 1,
+    orderNo = randomUUID().replace(/-/g, '').slice(0, 16),
   } = params
   const side = params.side.toUpperCase()
 
@@ -93,7 +97,7 @@ export async function placeAndExecuteCrypto(params: {
       .values({
         version: 'v1',
         accountId: account.id,
-        orderNo: randomUUID().replace(/-/g, '').slice(0, 16),
+        orderNo,
         symbol,
         name,
         market: 'CRYPTO',

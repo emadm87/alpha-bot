@@ -21,6 +21,16 @@
  * Offline: throwaway SQLite file (`ensureSchema()` only, no seed), prices
  * from the real price cache, `globalThis.fetch` throws. Log output silenced.
  *
+ * Task 003J: liquidatePositions now closes through placeAndExecuteCrypto.
+ * Updated tests (motivated, expected outcomes unchanged where still valid):
+ *  - E2-B: the below-threshold precondition is now measured before the
+ *    second monitor pass (it was measured after, which only held while the
+ *    liquidation did not happen).
+ *  - E2-C control 3: its premise (failed attempts) no longer exists; it now
+ *    checks the accounting of the successful SHORT liquidation.
+ *  - E2-D: label only; it still exercises the legacy orderMatching BUY,
+ *    which liquidations no longer use but manual REST/WS orders still do.
+ *
  * Run with: npx tsx --test src/services/liquidation.test.ts
  */
 import assert from 'node:assert/strict'
@@ -230,6 +240,7 @@ describe('E2-A — LONG 2x 19.9 @100 liquidated at 70 (fork level 40.36% < 50%)'
 
 describe('E2-B — stale margin_used after liquidation hides a new under-margined LONG', () => {
   let accId: number
+  let beforeSecondPass: { cash: number; marginUsed: number }
 
   before(async () => {
     accId = createAccount().id
@@ -240,21 +251,24 @@ describe('E2-B — stale margin_used after liquidation hides a new under-margine
     // True equity = cash + 395 - 237; true level ~41% < 50% -> should liquidate.
     await open(accId, 'XRP', 'LONG', 7.9, 100, 2)
     cachePrice('XRP', 'CRYPTO', 70)
+    const a = reloadAccount(accId)
+    beforeSecondPass = { cash: a.currentCash, marginUsed: a.marginUsed }
     await marginPass()
   })
   after(() => retire(accId))
 
   test('second position is liquidated (true margin level below the fork threshold)', (t) => {
-    const acc = reloadAccount(accId)
+    const acc = beforeSecondPass
     const trueMargin = (7.9 * 100) / 2
     const pnl = 7.9 * (70 - 100)
-    const trueEquity = acc.currentCash + trueMargin + pnl
-    const monitorEquity = acc.currentCash + acc.marginUsed + pnl
+    const trueEquity = acc.cash + trueMargin + pnl
+    const monitorEquity = acc.cash + acc.marginUsed + pnl
     t.diagnostic(
-      `cash=${fmt(acc.currentCash)} margin_used=${fmt(acc.marginUsed)} true_margin=${trueMargin} pnl=${pnl} | ` +
+      `before 2nd pass: cash=${fmt(acc.cash)} margin_used=${fmt(acc.marginUsed)} true_margin=${trueMargin} pnl=${pnl} | ` +
         `true_equity=${fmt(trueEquity)} true_level=${fmt((trueEquity / trueMargin) * 100)}% | ` +
         `monitor_equity=${fmt(monitorEquity)} monitor_level=${fmt((monitorEquity / acc.marginUsed) * 100)}% | ` +
-        `XRP_qty=${positionOf(accId, 'XRP')!.quantity}`,
+        `after: XRP_qty=${positionOf(accId, 'XRP')!.quantity} cash=${fmt(reloadAccount(accId).currentCash)} ` +
+        `margin_used=${fmt(reloadAccount(accId).marginUsed)}`,
     )
     assert.ok(trueEquity / trueMargin < 0.5, 'scenario must be below the fork threshold')
     approxEqual(positionOf(accId, 'XRP')!.quantity, 0, 'XRP position quantity')
@@ -296,15 +310,27 @@ describe('E2-C — SHORT 2x 19.9 @100 at 130 (fork level 40.36% < 50%), two moni
     assert.equal(pending.length, 0, `pending LIQ orders: ${pending.length}`)
   })
 
-  test('control: failed attempts leave cash, margin and trades untouched', () => {
+  test('liquidation accounting: cash + margin + gross P&L - taker fee - interest, margin released', () => {
     const acc = reloadAccount(accId)
-    approxEqual(acc.currentCash, cashBefore, 'cash')
-    approxEqual(acc.marginUsed, marginBefore, 'margin_used')
-    assert.equal(tradesOf(accId).length, 1, 'only the open trade')
+    const closeTrade = tradesOf(accId)[1]!
+    const pnl = 19.9 * (100 - 130) // -597
+    const fee = 19.9 * 130 * CRYPTO_TAKER_FEE_RATE // 1.8109
+    approxEqual(closeTrade.takerFee, fee, 'close taker_fee')
+    approxEqual(
+      acc.currentCash,
+      cashBefore + marginBefore + pnl - fee - closeTrade.interestCharged,
+      'cash',
+    )
+    approxEqual(acc.marginUsed, 0, 'margin_used')
+    assert.deepEqual(
+      [closeTrade.side, closeTrade.quantity],
+      ['BUY', 19.9],
+      'one real BUY close of the full quantity',
+    )
   })
 })
 
-describe('E2-D — orderMatching BUY (as built by liquidatePositions) on a SHORT, ample cash', () => {
+describe('E2-D — legacy orderMatching BUY on a SHORT (former liquidation order; still used by manual orders)', () => {
   const S = 'DOGE'
   let accId: number
   let executed: boolean
@@ -412,5 +438,91 @@ describe('E2-F — insolvency: LONG 2x 19.9 @100, price gaps to 40 (loss 1194 > 
         `liq_orders=${JSON.stringify(liquidationOrders(accId).map((o) => [o.side, o.status]))}`,
     )
     assert.ok(acc.currentCash >= 0, `cash=${acc.currentCash}`)
+  })
+})
+
+// --------------------------------------------------------------- Task 003J
+
+describe('003J — liquidation history is identifiable and separate from AI closes', () => {
+  let accId: number
+
+  before(async () => {
+    accId = createAccount().id
+    // A voluntary (AI-style) open+close, then a position that gets liquidated.
+    await open(accId, 'ADA', 'LONG', 1, 100, 2)
+    await placeAndExecuteCrypto({
+      account: reloadAccount(accId),
+      symbol: 'ADA',
+      name: 'ADA',
+      side: 'SELL',
+      orderType: 'MARKET',
+      price: null,
+      quantity: 1,
+      leverage: 2,
+    })
+    await open(accId, 'DOT', 'SHORT', 19.7, 100, 2)
+    cachePrice('DOT', 'CRYPTO', 130)
+    await marginPass()
+  })
+  after(() => retire(accId))
+
+  test('only the liquidation order carries the LIQ- prefix and links to its trade', (t) => {
+    const all = db.select().from(orders).where(eq(orders.accountId, accId)).orderBy(asc(orders.id)).all()
+    const liq = all.filter((o) => o.orderNo.startsWith('LIQ-'))
+    const liqTrades = tradesOf(accId).filter((tr) => liq.some((o) => o.id === tr.orderId))
+    t.diagnostic(
+      `orders=${JSON.stringify(all.map((o) => [o.symbol, o.side, o.status, o.orderNo.slice(0, 4)]))} | ` +
+        `liq_trades=${JSON.stringify(liqTrades.map((tr) => [tr.symbol, tr.side, tr.quantity, tr.price]))}`,
+    )
+    assert.equal(all.length, 4, 'open ADA, close ADA, open DOT, liquidate DOT')
+    assert.deepEqual(
+      liq.map((o) => [o.symbol, o.side, o.status]),
+      [['DOT', 'BUY', 'FILLED']],
+    )
+    assert.deepEqual(
+      liqTrades.map((tr) => [tr.symbol, tr.side, tr.quantity]),
+      [['DOT', 'BUY', 19.7]],
+    )
+    approxEqual(positionOf(accId, 'DOT')!.quantity, 0, 'DOT quantity')
+  })
+})
+
+describe('003J — a liquidation close the engine rejects leaves no order behind', () => {
+  let accId: number
+
+  before(async () => {
+    // Dust LONG 2x below the engine's minimum order quantity (0.0001), so
+    // placeAndExecuteCrypto refuses the close. Inserted directly: the engine
+    // would not open it either.
+    accId = createAccount().id
+    db.update(accounts).set({ currentCash: 0, marginUsed: 0.0025 }).where(eq(accounts.id, accId)).run()
+    db.insert(positions)
+      .values({
+        version: 'v1',
+        accountId: accId,
+        symbol: 'DUST',
+        name: 'DUST',
+        market: 'CRYPTO',
+        quantity: 0.00005,
+        availableQuantity: 0.00005,
+        avgCost: 100,
+        leverage: 2,
+        side: 'LONG',
+        accumulatedInterest: 0,
+      })
+      .run()
+    cachePrice('DUST', 'CRYPTO', 10) // equity 0 + 0.0025 - 0.0045 < 0
+    await marginPass()
+    await marginPass()
+  })
+  after(() => retire(accId))
+
+  test('no LIQ orders (pending or otherwise) after two failed passes', (t) => {
+    const liq = liquidationOrders(accId)
+    t.diagnostic(
+      `liq_orders=${liq.length} | position qty=${positionOf(accId, 'DUST')!.quantity} (still open: dust below min order size)`,
+    )
+    assert.equal(liq.length, 0)
+    assert.equal(tradesOf(accId).length, 0)
   })
 })

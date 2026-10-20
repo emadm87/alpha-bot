@@ -12,13 +12,12 @@ import { db } from '../db/client.js'
 import {
   accounts,
   cryptoPrices,
-  orders,
   positions as positionsTable,
   type Account,
   type Position,
 } from '../db/schema.js'
 import { getLogger } from '../utils/logger.js'
-import { utcDateStr, utcNow } from '../utils/datetime.js'
+import { utcDateStr } from '../utils/datetime.js'
 
 const logger = getLogger('services.scheduler')
 
@@ -388,59 +387,60 @@ export class TaskScheduler {
     }
   }
 
-  /** Force close (liquidate) all given positions for an account. */
+  /**
+   * Force close (liquidate) all given positions for an account through the
+   * perpetual engine, so margin, P&L and fees follow the same accounting as
+   * AI closes. Orders are tagged with a `LIQ-` order number. Account and
+   * position are re-read before each close; a failed close rolls back
+   * entirely and leaves no order behind.
+   */
   private async liquidatePositions(
     account: Account,
     positions: Position[],
     reason: string,
   ): Promise<void> {
-    const { checkAndExecuteOrder } = await import('./orderMatching.js')
+    const { placeAndExecuteCrypto } = await import('./orderExecutorLeverage.js')
     const { randomUUID } = await import('node:crypto')
 
-    for (const position of positions) {
+    for (const { id: positionId, symbol } of positions) {
       try {
-        if (position.quantity <= 0) continue
+        const position = db
+          .select()
+          .from(positionsTable)
+          .where(eq(positionsTable.id, positionId))
+          .get()
+        if (!position || position.quantity <= 0) continue
+
+        const freshAccount = db
+          .select()
+          .from(accounts)
+          .where(eq(accounts.id, account.id))
+          .get()
+        if (!freshAccount) return
 
         // SELL closes LONG, BUY closes SHORT
-        const closeSide = position.side === 'LONG' ? 'SELL' : 'BUY'
+        const closeSide = position.side === 'SHORT' ? 'BUY' : 'SELL'
         const orderNo = `LIQ-${randomUUID().replace(/-/g, '').slice(0, 16).toUpperCase()}`
 
-        const order = db
-          .insert(orders)
-          .values({
-            version: 'v1',
-            accountId: account.id,
-            orderNo,
-            symbol: position.symbol,
-            name: position.name,
-            market: position.market,
-            side: closeSide,
-            orderType: 'MARKET',
-            price: null, // Market order
-            quantity: position.quantity,
-            leverage: 1, // Closing orders don't use leverage
-            filledQuantity: 0,
-            status: 'PENDING',
-            orderTime: utcNow(),
-          })
-          .returning()
-          .get()
+        const order = await placeAndExecuteCrypto({
+          account: freshAccount,
+          symbol: position.symbol,
+          name: position.name,
+          side: closeSide,
+          orderType: 'MARKET',
+          price: null,
+          quantity: position.quantity,
+          leverage: position.leverage,
+          orderNo,
+        })
 
-        const executed = await checkAndExecuteOrder(order)
-
-        if (executed) {
-          logger.warning(
-            `🔴 LIQUIDATED: ${account.name} ${closeSide} ${position.quantity} ${position.symbol} ` +
-              `at market price. Reason: ${reason}`,
-          )
-        } else {
-          logger.error(
-            `Failed to execute liquidation order ${orderNo} for ${position.symbol}`,
-          )
-        }
+        logger.warning(
+          `🔴 LIQUIDATED: ${account.name} ${closeSide} ${position.quantity} ${position.symbol} ` +
+            `at $${order.price} (${order.orderNo}). Reason: ${reason}`,
+        )
       } catch (e) {
         logger.error(
-          `Error liquidating position ${position.symbol} for ${account.name}: ${e}`,
+          `Error liquidating position ${symbol} for ${account.name}: ${e}`,
         )
       }
     }
