@@ -227,3 +227,46 @@ describe('Controls — paths already handled by the engine', () => {
   test('SHORT 2x @100, BUY close @90 -> gross P&L +10, cash 1000 + 10 - 0.07 - 0.063 = 1009.867', () =>
     runCycle({ symbol: 'XRP', openSide: 'SHORT', closeSide: 'BUY', leverage: 2, quantity: 1, entry: 100, exit: 90 }))
 })
+
+describe('E3 — wrong-side close of a SHORT 1x is rejected', () => {
+  test('SHORT 1x @100, SELL @90 -> rejected, position and cash unchanged, nothing recorded', async () => {
+    const acc = createAccount()
+    cachePrice('BNB', 'CRYPTO', 100)
+    await placeAndExecuteCrypto({
+      account: reloadAccount(acc.id),
+      symbol: 'BNB',
+      name: 'BNB',
+      side: 'SHORT',
+      orderType: 'MARKET',
+      price: null,
+      quantity: 1,
+      leverage: 1,
+    })
+    const cashAfterOpen = INITIAL_CASH - 100 - 100 * CRYPTO_TAKER_FEE_RATE
+
+    cachePrice('BNB', 'CRYPTO', 90)
+    await assert.rejects(
+      placeAndExecuteCrypto({
+        account: reloadAccount(acc.id),
+        symbol: 'BNB',
+        name: 'BNB',
+        side: 'SELL',
+        orderType: 'MARKET',
+        price: null,
+        quantity: 1,
+        leverage: 1,
+      }),
+      /Cannot SELL to close a SHORT position/,
+    )
+
+    const pos = getPosition(acc.id)!
+    assert.equal(pos.side, 'SHORT', 'position side unchanged')
+    approxEqual(pos.quantity, 1, 'position quantity unchanged')
+    approxEqual(pos.availableQuantity, 1, 'position available_quantity unchanged')
+    const account = reloadAccount(acc.id)
+    approxEqual(account.currentCash, cashAfterOpen, 'cash unchanged after rejected SELL')
+    approxEqual(account.marginUsed, 0, 'margin_used unchanged after rejected SELL')
+    assert.equal(getTrades(acc.id).length, 1, 'only the open trade is recorded')
+    assert.equal(getOrders(acc.id).length, 1, 'rejected order is not recorded')
+  })
+})
