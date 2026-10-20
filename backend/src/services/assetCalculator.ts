@@ -8,14 +8,18 @@ import { getLogger } from '../utils/logger.js'
 const logger = getLogger('services.assetCalculator')
 
 /**
- * Calculate total equity in positions (for leveraged positions:
- * margin + unrealized P&L).
+ * Calculate total equity in positions: margin posted at entry + unrealized P&L.
  *
- * For leveraged positions the equity is NOT the full market value
- * (quantity * price), but the margin used plus unrealized profit/loss:
+ * Account cash already had the entry margin deducted on open, so each
+ * position contributes what closing it would return (before fees/interest):
  *
- *   Equity = Initial Margin + Unrealized P&L
- *          = (market_value / leverage) + quantity * (current_price - avg_cost)
+ *   Equity = Entry Margin + Unrealized P&L
+ *   Entry Margin = avg_cost * quantity / leverage
+ *   P&L (LONG)   = quantity * (current_price - avg_cost)
+ *   P&L (SHORT)  = quantity * (avg_cost - current_price)
+ *
+ * At leverage 1 a LONG reduces to quantity * current_price (spot market
+ * value). Positions without a side are treated as LONG.
  *
  * @returns Total equity in positions; positions whose price cannot be
  *          obtained are skipped.
@@ -38,21 +42,13 @@ export async function calcPositionsMarketValue(
       const avgCost = p.avgCost
       const leverage = p.leverage && p.leverage > 0 ? p.leverage : 1
 
-      // Market value of position
-      const marketValue = quantity * price
+      const entryMargin = (quantity * avgCost) / leverage
+      const unrealizedPnl =
+        p.side === 'SHORT'
+          ? quantity * (avgCost - price)
+          : quantity * (price - avgCost)
 
-      let positionEquity: number
-      if (leverage > 1) {
-        // For leveraged positions, only count margin + unrealized P&L
-        const initialMargin = marketValue / leverage
-        const unrealizedPnl = quantity * (price - avgCost)
-        positionEquity = initialMargin + unrealizedPnl
-      } else {
-        // Non-leveraged position: equity = market value
-        positionEquity = marketValue
-      }
-
-      total += positionEquity
+      total += entryMargin + unrealizedPnl
     } catch (e) {
       logger.warning(
         `Cannot get price for ${p.symbol}.${p.market}, skipping position value calculation: ${e}`,

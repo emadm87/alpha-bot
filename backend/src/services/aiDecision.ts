@@ -10,7 +10,7 @@ import {
   positions as positionsTable,
   type Account,
 } from '../db/schema.js'
-import { calcPositionsValue } from './assetCalculator.js'
+import { calcPositionsMarketValue } from './assetCalculator.js'
 import { fetchLatestNews } from './newsFeed.js'
 import { getLogger } from '../utils/logger.js'
 
@@ -92,7 +92,8 @@ export async function getPortfolioData(account: Account): Promise<Portfolio> {
     cash: account.currentCash,
     frozen_cash: account.frozenCash,
     positions: portfolio,
-    total_assets: account.currentCash + (await calcPositionsValue(account.id)),
+    total_assets:
+      account.currentCash + (await calcPositionsMarketValue(account.id)),
   }
 }
 
