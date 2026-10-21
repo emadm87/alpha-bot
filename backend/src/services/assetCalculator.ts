@@ -1,7 +1,7 @@
 /** Port of `services/asset_calculator.py`. */
 import { eq } from 'drizzle-orm'
 import { db } from '../db/client.js'
-import { positions } from '../db/schema.js'
+import { positions, type Account } from '../db/schema.js'
 import { getLastPrice } from './marketData.js'
 import { getLogger } from '../utils/logger.js'
 
@@ -61,6 +61,77 @@ export async function calcPositionsMarketValue(
   }
 
   return total
+}
+
+export interface AccountEquity {
+  /** Account value: cash + posted margin + unrealized P&L. */
+  equity: number
+  /** Posted margin + unrealized P&L of open positions (equity - cash). */
+  positionsEquity: number
+  /** Margin posted for open positions (full entry notional at 1x). */
+  postedMargin: number
+  unrealizedPnl: number
+  /** Real exposure: sum(quantity * price). */
+  exposure: number
+}
+
+/**
+ * Account equity (account value) = cash + posted margin + unrealized P&L.
+ *
+ * placeAndExecuteCrypto takes each position's entry margin
+ * (quantity * avgCost / leverage, the full entry notional at 1x) and the
+ * opening fee out of cash, and gives the same margin back on close, so the
+ * margin of every open position is added back here. It is computed per
+ * position rather than read from account.marginUsed, which does not cover
+ * 1x positions and is not released by liquidations run through
+ * orderMatching.
+ * Unrealized P&L is side-aware: LONG quantity * (price - avgCost),
+ * SHORT quantity * (avgCost - price). Fees already charged stay out of
+ * equity because they left cash for good.
+ *
+ * When a price cannot be fetched, the position's margin is still counted
+ * and its unrealized P&L is taken as 0.
+ */
+export async function calcAccountEquity(
+  account: Account,
+): Promise<AccountEquity> {
+  const rows = db
+    .select()
+    .from(positions)
+    .where(eq(positions.accountId, account.id))
+    .all()
+
+  let postedMargin = 0
+  let unrealizedPnl = 0
+  let exposure = 0
+
+  for (const p of rows) {
+    if (p.quantity <= 0) continue
+    const leverage = p.leverage > 1 ? p.leverage : 1
+    postedMargin += (p.quantity * p.avgCost) / leverage
+
+    try {
+      const price = await getLastPrice(p.symbol, p.market)
+      exposure += p.quantity * price
+      unrealizedPnl +=
+        p.side === 'SHORT'
+          ? p.quantity * (p.avgCost - price)
+          : p.quantity * (price - p.avgCost)
+    } catch (e) {
+      logger.warning(
+        `Cannot get price for ${p.symbol}.${p.market}, counting margin without unrealized P&L: ${e}`,
+      )
+    }
+  }
+
+  const positionsEquity = postedMargin + unrealizedPnl
+  return {
+    equity: account.currentCash + positionsEquity,
+    positionsEquity,
+    postedMargin,
+    unrealizedPnl,
+    exposure,
+  }
 }
 
 /**
