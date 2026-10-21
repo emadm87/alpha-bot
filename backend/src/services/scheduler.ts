@@ -326,7 +326,7 @@ export class TaskScheduler {
 
   /** Check margin level for a specific account and liquidate if necessary. */
   private async checkAccountMargin(account: Account): Promise<void> {
-    const { getLastPrice } = await import('./marketData.js')
+    const { calcAccountEquity } = await import('./assetCalculator.js')
 
     const positions = db
       .select()
@@ -342,30 +342,9 @@ export class TaskScheduler {
 
     if (positions.length === 0) return
 
-    let totalPnl = 0
-
-    for (const position of positions) {
-      try {
-        const currentPrice = await getLastPrice(position.symbol, position.market)
-        if (!currentPrice || currentPrice <= 0) {
-          logger.warning(
-            `Invalid price for ${position.symbol}, skipping margin check`,
-          )
-          continue
-        }
-
-        // SHORT profits when price falls; LONG (and unspecified) when it rises.
-        totalPnl +=
-          position.side === 'SHORT'
-            ? position.quantity * (position.avgCost - currentPrice)
-            : position.quantity * (currentPrice - position.avgCost)
-      } catch (e) {
-        logger.error(`Error calculating PnL for ${position.symbol}: ${e}`)
-      }
-    }
-
-    // Equity: cash + unrealised PnL
-    const equity = account.currentCash + totalPnl
+    // Equity: cash + posted margin + unrealised PnL. Opening a position
+    // takes its margin out of cash, so the margin is added back.
+    const { equity } = await calcAccountEquity(account)
     const marginUsed = account.marginUsed
 
     if (marginUsed <= 0) return // No margin used, nothing to check
