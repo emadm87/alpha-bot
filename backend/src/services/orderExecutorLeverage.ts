@@ -58,6 +58,8 @@ export async function placeAndExecuteCrypto(params: {
   price: number | null
   quantity: number
   leverage?: number
+  /** Order number to record; a random one when omitted. */
+  orderNo?: string
 }): Promise<Order> {
   const {
     account,
@@ -67,6 +69,7 @@ export async function placeAndExecuteCrypto(params: {
     price,
     quantity,
     leverage = 1,
+    orderNo = randomUUID().replace(/-/g, '').slice(0, 16),
   } = params
   const side = params.side.toUpperCase()
 
@@ -93,7 +96,7 @@ export async function placeAndExecuteCrypto(params: {
       .values({
         version: 'v1',
         accountId: account.id,
-        orderNo: randomUUID().replace(/-/g, '').slice(0, 16),
+        orderNo,
         symbol,
         name,
         market: 'CRYPTO',

@@ -12,13 +12,12 @@ import { db } from '../db/client.js'
 import {
   accounts,
   cryptoPrices,
-  orders,
   positions as positionsTable,
   type Account,
   type Position,
 } from '../db/schema.js'
 import { getLogger } from '../utils/logger.js'
-import { utcDateStr, utcNow } from '../utils/datetime.js'
+import { utcDateStr } from '../utils/datetime.js'
 
 const logger = getLogger('services.scheduler')
 
@@ -372,53 +371,50 @@ export class TaskScheduler {
     positions: Position[],
     reason: string,
   ): Promise<void> {
-    const { checkAndExecuteOrder } = await import('./orderMatching.js')
+    const { placeAndExecuteCrypto } = await import('./orderExecutorLeverage.js')
     const { randomUUID } = await import('node:crypto')
 
     for (const position of positions) {
+      const orderNo = `LIQ-${randomUUID().replace(/-/g, '').slice(0, 16).toUpperCase()}`
       try {
-        if (position.quantity <= 0) continue
+        // Re-read both: an earlier close in this loop changed cash and margin
+        const current = db
+          .select()
+          .from(positionsTable)
+          .where(eq(positionsTable.id, position.id))
+          .get()
+        const latestAccount = db
+          .select()
+          .from(accounts)
+          .where(eq(accounts.id, account.id))
+          .get()
+        if (!current || current.quantity <= 0 || !latestAccount) continue
 
         // SELL closes LONG, BUY closes SHORT
-        const closeSide = position.side === 'LONG' ? 'SELL' : 'BUY'
-        const orderNo = `LIQ-${randomUUID().replace(/-/g, '').slice(0, 16).toUpperCase()}`
+        const closeSide = current.side === 'LONG' ? 'SELL' : 'BUY'
 
-        const order = db
-          .insert(orders)
-          .values({
-            version: 'v1',
-            accountId: account.id,
-            orderNo,
-            symbol: position.symbol,
-            name: position.name,
-            market: position.market,
-            side: closeSide,
-            orderType: 'MARKET',
-            price: null, // Market order
-            quantity: position.quantity,
-            leverage: 1, // Closing orders don't use leverage
-            filledQuantity: 0,
-            status: 'PENDING',
-            orderTime: utcNow(),
-          })
-          .returning()
-          .get()
+        // The perpetual engine records the order, the fill, the margin
+        // release and the position reset in one transaction, so a failed
+        // close leaves nothing behind.
+        await placeAndExecuteCrypto({
+          account: latestAccount,
+          symbol: current.symbol,
+          name: current.name,
+          side: closeSide,
+          orderType: 'MARKET',
+          price: null,
+          quantity: current.quantity,
+          leverage: current.leverage,
+          orderNo,
+        })
 
-        const executed = await checkAndExecuteOrder(order)
-
-        if (executed) {
-          logger.warning(
-            `🔴 LIQUIDATED: ${account.name} ${closeSide} ${position.quantity} ${position.symbol} ` +
-              `at market price. Reason: ${reason}`,
-          )
-        } else {
-          logger.error(
-            `Failed to execute liquidation order ${orderNo} for ${position.symbol}`,
-          )
-        }
+        logger.warning(
+          `🔴 LIQUIDATED: ${account.name} ${closeSide} ${current.quantity} ${current.symbol} ` +
+            `at market price. Reason: ${reason}`,
+        )
       } catch (e) {
         logger.error(
-          `Error liquidating position ${position.symbol} for ${account.name}: ${e}`,
+          `Failed to execute liquidation order ${orderNo} for ${position.symbol}: ${e}`,
         )
       }
     }
