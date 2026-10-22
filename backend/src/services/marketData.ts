@@ -4,13 +4,30 @@ import {
   getAllSymbolsFromHyperliquid,
   getKlineDataFromHyperliquid,
   getLastPriceFromHyperliquid,
+  getLastPricesFromHyperliquid,
   getMarketStatusFromHyperliquid,
+  MAINSTREAM_CRYPTOS,
   type Kline,
   type MarketStatus,
 } from './hyperliquid.js'
 import { cachePrice, getCachedPrice } from './priceCache.js'
 
 const logger = getLogger('services.marketData')
+
+/** Price requests in flight, shared by callers that ask at the same time. */
+const inFlight = new Map<string, Promise<Record<string, number | null>>>()
+
+function sharedRequest(
+  key: string,
+  load: () => Promise<Record<string, number | null>>,
+): Promise<Record<string, number | null>> {
+  let request = inFlight.get(key)
+  if (!request) {
+    request = load().finally(() => inFlight.delete(key))
+    inFlight.set(key, request)
+  }
+  return request
+}
 
 export async function getLastPrice(
   symbol: string,
@@ -28,7 +45,25 @@ export async function getLastPrice(
   logger.info(`Getting real-time price for ${key} from API...`)
 
   try {
-    const price = await getLastPriceFromHyperliquid(symbol)
+    // The six mainstream perps come from one request (it costs the same as a
+    // single ticker) and are cached together; other symbols keep their own.
+    const mainstream = MAINSTREAM_CRYPTOS.includes(symbol)
+    const prices = mainstream
+      ? await sharedRequest('mainstream', () =>
+          getLastPricesFromHyperliquid(MAINSTREAM_CRYPTOS),
+        )
+      : await sharedRequest(symbol, async () => ({
+          [symbol]: await getLastPriceFromHyperliquid(symbol),
+        }))
+    if (mainstream) {
+      for (const [other, otherPrice] of Object.entries(prices)) {
+        if (other !== symbol && otherPrice && otherPrice > 0) {
+          cachePrice(other, market, otherPrice)
+        }
+      }
+    }
+
+    const price = prices[symbol]
     if (price && price > 0) {
       logger.info(`Got real-time price for ${key} from Hyperliquid: ${price}`)
       cachePrice(symbol, market, price)

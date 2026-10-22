@@ -46,7 +46,7 @@ const TIMEFRAME_MAP: Record<string, string> = {
   '1d': '1d',
 }
 
-const MAINSTREAM_CRYPTOS = ['BTC', 'ETH', 'SOL', 'DOGE', 'BNB', 'XRP']
+export const MAINSTREAM_CRYPTOS = ['BTC', 'ETH', 'SOL', 'DOGE', 'BNB', 'XRP']
 
 class HyperliquidClient {
   private exchange: HyperliquidExchange | null = null
@@ -98,6 +98,30 @@ class HyperliquidClient {
       logger.error(`Error fetching price for ${symbol}: ${e}`)
       return null
     }
+  }
+
+  /**
+   * Last prices of several symbols from one fetchTickers call, which makes
+   * the same markets request as a single fetchTicker. A symbol without a
+   * price maps to null; on error every symbol maps to null.
+   */
+  async getLastPrices(
+    symbols: string[],
+  ): Promise<Record<string, number | null>> {
+    const result: Record<string, number | null> = {}
+    for (const symbol of symbols) result[symbol] = null
+    try {
+      const formatted = symbols.map((s) => this.formatSymbol(s))
+      const tickers = await this.getExchange().fetchTickers(formatted)
+      symbols.forEach((symbol, i) => {
+        const price = tickers[formatted[i]!]?.last
+        result[symbol] = price ? Number(price) : null
+      })
+      logger.info(`Got prices for ${formatted.join(', ')}`)
+    } catch (e) {
+      logger.error(`Error fetching prices for ${symbols.join(', ')}: ${e}`)
+    }
+    return result
   }
 
   async getKlineData(
@@ -217,6 +241,9 @@ export const hyperliquidClient = new HyperliquidClient()
 
 export const getLastPriceFromHyperliquid = (symbol: string) =>
   hyperliquidClient.getLastPrice(symbol)
+
+export const getLastPricesFromHyperliquid = (symbols: string[]) =>
+  hyperliquidClient.getLastPrices(symbols)
 
 export const getKlineDataFromHyperliquid = (
   symbol: string,
