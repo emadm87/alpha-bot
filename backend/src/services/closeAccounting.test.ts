@@ -142,16 +142,9 @@ for (const side of ['LONG', 'SHORT'] as const) {
         const rest = position(id, symbol).quantity
         assert.equal(rest, round6(size - first), 'remaining quantity is the 6-decimal difference')
 
-        if (rest < MIN) {
-          // Real residue below the original minimum: the rule is kept
-          await assert.rejects(
-            trade(id, symbol, closeSide, aiClose(rest, 1), 3, BTC),
-            /Quantity must be >= 0.0001/,
-          )
-          assert.equal(position(id, symbol).quantity, rest)
-          dust++
-          continue
-        }
+        // Real residues below the 0.0001 minimum close too: a 100% close
+        // of a smaller position is allowed (Task 005G)
+        if (rest < MIN) dust++
 
         const second = aiClose(rest, 1)
         await trade(id, symbol, closeSide, second, 3, BTC)
@@ -173,8 +166,8 @@ for (const side of ['LONG', 'SHORT'] as const) {
         fullyClosed++
       }
     }
-    t.diagnostic(`fully closed=${fullyClosed} dust kept by the minimum=${dust}`)
-    assert.equal(fullyClosed + dust, SIZES.length * PORTIONS.length)
+    t.diagnostic(`fully closed=${fullyClosed} of which below the minimum=${dust}`)
+    assert.equal(fullyClosed, SIZES.length * PORTIONS.length)
     assert.equal(dust, 4, 'the four real residues below 0.0001 of Task 005E-C')
   })
 }

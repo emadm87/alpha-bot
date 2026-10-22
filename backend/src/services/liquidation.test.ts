@@ -302,7 +302,7 @@ test('missing price at execution: no order recorded, position unchanged', async 
   close(account(id).marginUsed, 500, 'margin_used unchanged')
 })
 
-test('quantity below the engine minimum: not liquidated, no order (documented limit)', async () => {
+test('quantity below the engine minimum: the whole position is liquidated', async () => {
   const id = newAccount()
   await open(id, 'DA', 'LONG', 1, 2, 100)
   rawDb
@@ -310,8 +310,12 @@ test('quantity below the engine minimum: not liquidated, no order (documented li
     .run(id, 'DA')
   cachePrice('DA', 'CRYPTO', 24)
   await liquidate(id)
-  assert.equal(liqOrders(id).length, 0, 'no LIQ- order')
-  assert.equal(position(id, 'DA').quantity, 0.00005, 'dust position stays open')
+  assert.deepEqual(
+    liqOrders(id).map((o) => [o.side, o.quantity, o.status]),
+    [['SELL', 0.00005, 'FILLED']],
+  )
+  assert.equal(position(id, 'DA').quantity, 0, 'dust position closed')
+  assert.equal(position(id, 'DA').side, null)
 })
 
 test('loss beyond the margin: closed, cash goes negative (no insolvency rule)', async () => {

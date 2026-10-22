@@ -86,7 +86,10 @@ export async function placeAndExecuteCrypto(params: {
     throw new Error(`Leverage must be between 1 and ${CRYPTO_MAX_LEVERAGE}`)
   }
 
-  if (quantity < CRYPTO_MIN_ORDER_QUANTITY) {
+  // A close below the minimum is checked against the position inside the
+  // transaction: only closing all of a smaller position is allowed.
+  const isClose = side === 'BUY' || side === 'SELL'
+  if (quantity <= 0 || (!isClose && quantity < CRYPTO_MIN_ORDER_QUANTITY)) {
     throw new Error(`Quantity must be >= ${CRYPTO_MIN_ORDER_QUANTITY}`)
   }
 
@@ -232,6 +235,12 @@ export async function placeAndExecuteCrypto(params: {
       // Closing a position (partial or full)
       if (!pos || pos.quantity === 0) {
         throw new Error('No position to close')
+      }
+
+      // Below the minimum, only a close of the whole position goes through;
+      // closing more than the position is rejected further down.
+      if (quantity < CRYPTO_MIN_ORDER_QUANTITY && quantity < pos.quantity) {
+        throw new Error(`Quantity must be >= ${CRYPTO_MIN_ORDER_QUANTITY}`)
       }
 
       // Settled within the same update as the released margin and P&L below,
