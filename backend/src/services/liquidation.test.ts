@@ -328,7 +328,7 @@ test('loss beyond the margin: closed, cash goes negative (no insolvency rule)', 
   assertClosed(id, 'XA')
 })
 
-test('cash below accrued interest: close rejected, no order (documented limit)', async () => {
+test('cash below accrued interest: closed, interest paid from the released margin', async () => {
   const id = newAccount()
   await open(id, 'YA', 'LONG', 19.9, 2, 100) // cash left 3.607
   const longAgo = utcNow(new Date(Date.now() - 400 * 3_600_000))
@@ -337,6 +337,12 @@ test('cash below accrued interest: close rejected, no order (documented limit)',
     .run(longAgo, id, 'YA')
   cachePrice('YA', 'CRYPTO', 70)
   await liquidate(id) // interest = 995 * 0.0000125 * 400 = 4.975 > 3.607
-  assert.equal(liqOrders(id).length, 0, 'no LIQ- order')
-  assert.equal(position(id, 'YA').quantity, 19.9, 'position stays open')
+
+  const interest = 995 * 0.0000125 * 400
+  const cash = 3.607 + 995 + 19.9 * (70 - 100) - FEE * 19.9 * 70 - interest
+  close(account(id).currentCash, cash, 'cash', 1e-5) // 395.6569
+  close(account(id).marginUsed, 0, 'margin_used')
+  assertClosed(id, 'YA')
+  const [t] = liqTrades(id)
+  close(t!.interestCharged, interest, 'interest charged once', 1e-5)
 })

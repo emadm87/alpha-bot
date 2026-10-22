@@ -26,6 +26,15 @@ function calcCryptoFee(notional: number): number {
   return notional * CRYPTO_TAKER_FEE_RATE
 }
 
+/**
+ * Round a quantity to the 6 decimals order quantities already use
+ * (tradingCommands round6, Python `round(x, 6)`), so that subtracting a close
+ * leaves no floating-point residue such as 0.000059000000000000025.
+ */
+function roundQuantity(value: number): number {
+  return Number(value.toFixed(6))
+}
+
 /** Calculate accumulated interest since the last calculation. */
 function calculatePositionInterest(position: Position): number {
   if (!position.lastInterestTime || position.leverage <= 1) return 0
@@ -225,15 +234,10 @@ export async function placeAndExecuteCrypto(params: {
         throw new Error('No position to close')
       }
 
+      // Settled within the same update as the released margin and P&L below,
+      // so a close is never refused because free cash alone is short of it
       interestCharged = calculatePositionInterest(pos)
-      if (interestCharged > 0) {
-        if (currentCash < interestCharged) {
-          throw new Error(
-            `Insufficient cash for interest payment: ${interestCharged}`,
-          )
-        }
-        currentCash -= interestCharged
-      }
+      currentCash -= interestCharged
 
       if (pos.leverage > 1) {
         // Closing leveraged position: BUY closes SHORT, SELL closes LONG
@@ -264,13 +268,13 @@ export async function placeAndExecuteCrypto(params: {
         currentCash += pnl + marginReleased - takerFee
         marginUsed -= marginReleased
 
-        const newQty = pos.quantity - quantity
+        const newQty = roundQuantity(pos.quantity - quantity)
         pos = tx
           .update(positions)
           .set({
             accumulatedInterest: pos.accumulatedInterest + interestCharged,
             quantity: newQty,
-            availableQuantity: pos.availableQuantity - quantity,
+            availableQuantity: roundQuantity(pos.availableQuantity - quantity),
             ...(newQty === 0
               ? { side: null, leverage: 1, lastInterestTime: null }
               : { lastInterestTime: utcNow() }),
@@ -296,8 +300,8 @@ export async function placeAndExecuteCrypto(params: {
           .update(positions)
           .set({
             accumulatedInterest: pos.accumulatedInterest + interestCharged,
-            quantity: pos.quantity - quantity,
-            availableQuantity: pos.availableQuantity - quantity,
+            quantity: roundQuantity(pos.quantity - quantity),
+            availableQuantity: roundQuantity(pos.availableQuantity - quantity),
             updateTime: utcNow(),
           })
           .where(eq(positions.id, pos.id))
