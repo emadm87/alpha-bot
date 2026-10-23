@@ -32,6 +32,21 @@ function calcCommission(notional: number): number {
 }
 
 /**
+ * Manual orders share the positions row with the perpetual engine
+ * (placeAndExecuteCrypto), which marks its positions LONG/SHORT. Filling a
+ * manual order into an open perpetual would mix the two, so such an order is
+ * refused when created and not filled while the perpetual is open.
+ */
+function perpetualConflict(position: { side: string | null; quantity: number } | undefined): string | null {
+  return position && position.side && position.quantity > 0
+    ? `an open ${position.side} perpetual position`
+    : null
+}
+
+/** Pending orders already reported as blocked, to log each one once. */
+const blockedOrders = new Set<number>()
+
+/**
  * Create limit order.
  *
  * @throws Error when validation fails or funds/positions are insufficient.
@@ -77,6 +92,24 @@ export async function createOrder(params: {
     }
   } else {
     checkPrice = price!
+  }
+
+  const current = db
+    .select()
+    .from(positions)
+    .where(
+      and(
+        eq(positions.accountId, account.id),
+        eq(positions.symbol, symbol),
+        eq(positions.market, 'CRYPTO'),
+      ),
+    )
+    .get()
+  const conflict = perpetualConflict(current)
+  if (conflict) {
+    throw new Error(
+      `${symbol} has ${conflict}: manual orders are not allowed until it is closed`,
+    )
   }
 
   // Pre-check funds and positions
@@ -221,6 +254,32 @@ function executeOrder(
       let commission = calcCommission(notional)
       const leverage = order.leverage
 
+      // Checked again inside the transaction: the perpetual may have been
+      // opened after this order was created. The order stays PENDING.
+      const current = tx
+        .select()
+        .from(positions)
+        .where(
+          and(
+            eq(positions.accountId, account.id),
+            eq(positions.symbol, order.symbol),
+            eq(positions.market, order.market),
+          ),
+        )
+        .get()
+      const conflict = perpetualConflict(current)
+      if (conflict) {
+        if (!blockedOrders.has(order.id)) {
+          blockedOrders.add(order.id)
+          logger.warning(
+            `Order ${order.orderNo} kept pending: ${order.symbol} has ${conflict}`,
+          )
+        }
+        tx.rollback()
+        return false
+      }
+      blockedOrders.delete(order.id)
+
       let newCash: number
 
       if (order.side === 'BUY') {
@@ -298,6 +357,9 @@ function executeOrder(
             availableQuantity: position.availableQuantity + quantity,
             avgCost: newAvgCost,
             leverage: Math.trunc(newLeverage),
+            // A buy reopening an empty row is a spot holding: clear the side
+            // a closed perpetual may have left on it
+            ...(oldQty === 0 ? { side: null } : {}),
           })
           .where(eq(positions.id, position.id))
           .run()

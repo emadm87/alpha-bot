@@ -248,7 +248,8 @@ export async function placeAndExecuteCrypto(params: {
       interestCharged = calculatePositionInterest(pos)
       currentCash -= interestCharged
 
-      if (pos.leverage > 1) {
+      // A SHORT closes here at any leverage: the spot branch below only sells
+      if (pos.leverage > 1 || pos.side === 'SHORT') {
         // Closing leveraged position: BUY closes SHORT, SELL closes LONG
         if (
           (side === 'SELL' && pos.side !== 'LONG') ||
@@ -275,7 +276,8 @@ export async function placeAndExecuteCrypto(params: {
 
         // Net cash change = PnL + margin released - closing fee
         currentCash += pnl + marginReleased - takerFee
-        marginUsed -= marginReleased
+        // Opening adds to marginUsed only above 1x
+        if (pos.leverage > 1) marginUsed -= marginReleased
 
         const newQty = roundQuantity(pos.quantity - quantity)
         pos = tx
