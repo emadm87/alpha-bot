@@ -36,7 +36,7 @@ function roundQuantity(value: number): number {
 }
 
 /** Calculate accumulated interest since the last calculation. */
-function calculatePositionInterest(position: Position): number {
+export function calculatePositionInterest(position: Position): number {
   if (!position.lastInterestTime || position.leverage <= 1) return 0
 
   const hoursElapsed =
