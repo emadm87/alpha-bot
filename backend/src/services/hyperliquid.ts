@@ -48,6 +48,23 @@ const TIMEFRAME_MAP: Record<string, string> = {
 
 export const MAINSTREAM_CRYPTOS = ['BTC', 'ETH', 'SOL', 'DOGE', 'BNB', 'XRP']
 
+/**
+ * Raw Hyperliquid asset context (midPx, markPx, funding, openInterest...)
+ * of a symbol, as received by the last successful getLastPrices call.
+ */
+export interface AssetContext {
+  info: Record<string, unknown>
+  /** Local time the response was received, ms since epoch. */
+  receivedAt: number
+}
+
+const assetContexts = new Map<string, AssetContext>()
+
+/** Context kept from the last getLastPrices call; no request is made. */
+export function getAssetContext(symbol: string): AssetContext | null {
+  return assetContexts.get(symbol) ?? null
+}
+
 class HyperliquidClient {
   private exchange: HyperliquidExchange | null = null
 
@@ -113,15 +130,42 @@ class HyperliquidClient {
     try {
       const formatted = symbols.map((s) => this.formatSymbol(s))
       const tickers = await this.getExchange().fetchTickers(formatted)
+      const receivedAt = Date.now()
       symbols.forEach((symbol, i) => {
-        const price = tickers[formatted[i]!]?.last
+        const ticker = tickers[formatted[i]!]
+        const price = ticker?.last
         result[symbol] = price ? Number(price) : null
+        // The same response carries funding, open interest, mark price...:
+        // keep it for the quantitative snapshot instead of asking again.
+        const info = ticker?.info
+        if (info && typeof info === 'object') {
+          assetContexts.set(symbol, { info: info as Record<string, unknown>, receivedAt })
+        } else {
+          assetContexts.delete(symbol) // never show an older answer as this one
+        }
       })
       logger.info(`Got prices for ${formatted.join(', ')}`)
     } catch (e) {
       logger.error(`Error fetching prices for ${symbols.join(', ')}: ${e}`)
     }
     return result
+  }
+
+  /**
+   * Raw candleSnapshot rows (t, T, o, h, l, c, v...) of a perpetual, oldest
+   * first; the last row may be a bar still forming. Errors are thrown so the
+   * caller can tell a rate limit from an empty answer.
+   */
+  async getCandleSnapshot(
+    coin: string,
+    interval: string,
+    startTime: number,
+    endTime: number,
+  ): Promise<unknown> {
+    return this.getExchange().publicPostInfo({
+      type: 'candleSnapshot',
+      req: { coin, interval, startTime, endTime },
+    })
   }
 
   async getKlineData(
@@ -244,6 +288,13 @@ export const getLastPriceFromHyperliquid = (symbol: string) =>
 
 export const getLastPricesFromHyperliquid = (symbols: string[]) =>
   hyperliquidClient.getLastPrices(symbols)
+
+export const getCandleSnapshotFromHyperliquid = (
+  coin: string,
+  interval: string,
+  startTime: number,
+  endTime: number,
+) => hyperliquidClient.getCandleSnapshot(coin, interval, startTime, endTime)
 
 export const getKlineDataFromHyperliquid = (
   symbol: string,
