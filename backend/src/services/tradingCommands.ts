@@ -16,6 +16,7 @@ import {
   saveAIDecision,
   SUPPORTED_SYMBOLS,
 } from './aiDecision.js'
+import { newCycleId, recordAICycle } from './aiDiagnostics.js'
 import { getLogger } from '../utils/logger.js'
 
 const logger = getLogger('services.tradingCommands')
@@ -145,11 +146,26 @@ export async function placeAIDrivenCryptoOrder(): Promise<void> {
           continue
         }
 
-        const decision = await callAIForDecision(account, portfolio, prices)
+        const cycleId = newCycleId()
+        const outcome = (status: string, detail: string, orderId?: number | null) =>
+          recordAICycle(cycleId, 'outcome', {
+            account_id: account.id,
+            status,
+            detail,
+            order_id: orderId ?? null,
+          })
+
+        const decision = await callAIForDecision(
+          account,
+          portfolio,
+          prices,
+          cycleId,
+        )
         if (!decision) {
           logger.warning(
             `Failed to get AI decision for ${account.name}, skipping`,
           )
+          outcome('no_decision', 'No usable AI decision; nothing executed')
           continue
         }
 
@@ -176,12 +192,14 @@ export async function placeAIDrivenCryptoOrder(): Promise<void> {
           logger.warning(
             `Invalid operation '${operation}' from AI for ${account.name}, skipping`,
           )
+          outcome('rejected', `Invalid operation '${operation}' from AI for ${account.name}, skipping`)
           saveAIDecision(account, decision, portfolio, false)
           continue
         }
 
         if (operation === 'hold') {
           logger.info(`AI decided to HOLD for ${account.name}`)
+          outcome('hold', 'No order placed')
           saveAIDecision(account, decision, portfolio, true)
           continue
         }
@@ -190,6 +208,7 @@ export async function placeAIDrivenCryptoOrder(): Promise<void> {
           logger.warning(
             `Invalid symbol '${symbol}' from AI for ${account.name}, skipping`,
           )
+          outcome('rejected', `Invalid symbol '${symbol}' from AI for ${account.name}, skipping`)
           saveAIDecision(account, decision, portfolio, false)
           continue
         }
@@ -198,6 +217,7 @@ export async function placeAIDrivenCryptoOrder(): Promise<void> {
           logger.warning(
             `Invalid direction '${direction}' from AI for ${account.name}, skipping`,
           )
+          outcome('rejected', `Invalid direction '${direction}' from AI for ${account.name}, skipping`)
           saveAIDecision(account, decision, portfolio, false)
           continue
         }
@@ -206,6 +226,7 @@ export async function placeAIDrivenCryptoOrder(): Promise<void> {
           logger.warning(
             `Invalid target_portion ${targetPortion} from AI for ${account.name}, skipping`,
           )
+          outcome('rejected', `Invalid target_portion ${targetPortion} from AI for ${account.name}, skipping`)
           saveAIDecision(account, decision, portfolio, false)
           continue
         }
@@ -215,6 +236,7 @@ export async function placeAIDrivenCryptoOrder(): Promise<void> {
           logger.warning(
             `Invalid price for ${symbol} for ${account.name}, skipping`,
           )
+          outcome('rejected', `Invalid price for ${symbol} for ${account.name}, skipping`)
           saveAIDecision(account, decision, portfolio, false)
           continue
         }
@@ -240,6 +262,7 @@ export async function placeAIDrivenCryptoOrder(): Promise<void> {
             logger.warning(
               `Cannot open ${direction} position on ${symbol} - already have a ${existingPosition.side} position. Only ONE position per coin allowed. Close existing position first.`,
             )
+            outcome('rejected', `Cannot open ${direction} position on ${symbol} - already have a ${existingPosition.side} position. Only ONE position per coin allowed. Close existing position first.`)
             saveAIDecision(account, decision, portfolio, false)
             continue
           }
@@ -251,6 +274,7 @@ export async function placeAIDrivenCryptoOrder(): Promise<void> {
             logger.info(
               `Calculated ${direction.toUpperCase()} quantity <= 0 for ${symbol} for ${account.name}, skipping`,
             )
+            outcome('rejected', `Calculated ${direction.toUpperCase()} quantity <= 0 for ${symbol} for ${account.name}, skipping`)
             saveAIDecision(account, decision, portfolio, false)
             continue
           }
@@ -274,6 +298,7 @@ export async function placeAIDrivenCryptoOrder(): Promise<void> {
             logger.warning(
               `No position available to close for ${symbol} for ${account.name}, skipping`,
             )
+            outcome('rejected', `No position available to close for ${symbol} for ${account.name}, skipping`)
             saveAIDecision(account, decision, portfolio, false)
             continue
           }
@@ -283,6 +308,7 @@ export async function placeAIDrivenCryptoOrder(): Promise<void> {
             logger.warning(
               `Cannot close ${direction} position on ${symbol} - current position is ${positionSide.toUpperCase()}. Direction mismatch!`,
             )
+            outcome('rejected', `Cannot close ${direction} position on ${symbol} - current position is ${positionSide.toUpperCase()}. Direction mismatch!`)
             saveAIDecision(account, decision, portfolio, false)
             continue
           }
@@ -298,6 +324,7 @@ export async function placeAIDrivenCryptoOrder(): Promise<void> {
             logger.info(
               `Calculated close quantity <= 0 for ${symbol} for ${account.name}, skipping`,
             )
+            outcome('rejected', `Calculated close quantity <= 0 for ${symbol} for ${account.name}, skipping`)
             saveAIDecision(account, decision, portfolio, false)
             continue
           }
@@ -330,6 +357,10 @@ export async function placeAIDrivenCryptoOrder(): Promise<void> {
         } catch (e) {
           logger.error(`Failed to execute order for ${account.name}: ${e}`)
           executed = false
+          outcome('execution_failed', `${side} ${symbol} quantity=${quantity} leverage=${leverage}x: ${e}`)
+        }
+        if (executed) {
+          outcome('executed', `${side} ${symbol} quantity=${quantity} leverage=${leverage}x`, orderId)
         }
 
         saveAIDecision(account, decision, portfolio, executed, orderId)

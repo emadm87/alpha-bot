@@ -11,6 +11,7 @@ import {
   type Account,
 } from '../db/schema.js'
 import { calcAccountEquity } from './assetCalculator.js'
+import { recordAICycle } from './aiDiagnostics.js'
 import { fetchLatestNews } from './newsFeed.js'
 import { getLogger } from '../utils/logger.js'
 
@@ -216,7 +217,11 @@ export async function callAIForDecision(
   account: Account,
   portfolio: Portfolio,
   prices: Record<string, number>,
+  cycleId?: string,
 ): Promise<AIDecision | null> {
+  const trace = (event: string, data: Record<string, unknown>) =>
+    recordAICycle(cycleId, event, data, [account.apiKey])
+
   if (isDefaultApiKey(account.apiKey)) {
     logger.info(
       `Skipping AI trading for account ${account.name} - using default API key`,
@@ -239,6 +244,12 @@ export async function callAIForDecision(
 
     const baseUrl = (account.baseUrl ?? '').replace(/\/+$/, '')
     const apiEndpoint = `${baseUrl}/chat/completions`
+    trace('request', {
+      account_id: account.id,
+      model: account.model,
+      endpoint: apiEndpoint,
+      payload,
+    })
 
     const maxRetries = 3
     let response: Response | null = null
@@ -267,15 +278,17 @@ export async function callAIForDecision(
             await sleep(waitTime * 1000)
             continue
           }
+          const body = await response.text()
           logger.error(
-            `AI API rate limited after ${maxRetries} attempts: ${await response.text()}`,
+            `AI API rate limited after ${maxRetries} attempts: ${body}`,
           )
+          trace('api_error', { status: 429, attempts: maxRetries, body })
           return null
         }
 
-        logger.error(
-          `AI API returned status ${response.status}: ${await response.text()}`,
-        )
+        const body = await response.text()
+        logger.error(`AI API returned status ${response.status}: ${body}`)
+        trace('api_error', { status: response.status, body })
         return null
       } catch (reqErr) {
         if (attempt < maxRetries - 1) {
@@ -289,6 +302,7 @@ export async function callAIForDecision(
         logger.error(
           `AI API request failed after ${maxRetries} attempts: ${reqErr}`,
         )
+        trace('api_error', { attempts: maxRetries, error: String(reqErr) })
         return null
       }
     }
@@ -296,6 +310,7 @@ export async function callAIForDecision(
     if (!response || response.status !== 200) return null
 
     const result = (await response.json()) as Record<string, any>
+    trace('response', { response: result })
 
     const choices = result.choices
     if (!Array.isArray(choices) || choices.length === 0) {
@@ -340,9 +355,11 @@ export async function callAIForDecision(
       ? String(decision.direction).toLowerCase()
       : 'long'
 
+    trace('decision', { decision })
     return decision
   } catch (err) {
     logger.error(`Unexpected error calling AI: ${err}`)
+    trace('api_error', { error: String(err) })
     return null
   }
 }
