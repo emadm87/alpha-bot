@@ -316,6 +316,26 @@ test('15. a position open under the original monitor that the new model would li
   assert.equal(r.state.belowBackstop, false)
 })
 
+test('16. margin table id below 50 (006G-5): ATOM SHORT 5x on the documented single 5x tier', async () => {
+  const meta = { ...META, universe: [...META.universe, { name: 'ATOM', maxLeverage: 5, marginTableId: 5 }] }
+  const tables = parseMetaResponse(meta, NOW - 60_000) as typeof TABLES
+  const id = newAccount()
+  await open(id, 'ATOM', 'SHORT', 1500, 5)
+  const r = ready(adapt(id, { ATOM: 100 }, { tables }))
+  assert.deepEqual(r.input.tiers.ATOM, [{ lowerBound: 0, maxLeverage: 5 }])
+  near(r.collateral.total, 998.95, 'collateral') // 1000 - 0.07% of 1500
+  near(r.state.maintenanceMargin, 150, 'maintenance: 1500 * 1/(2*5)')
+  // 998.95 + 15 * (100 - P) = 15 * P * 0.1  ->  P = 2498.95 / 16.5
+  near(liquidationPrice(r.input, 'ATOM').price, 2498.95 / 16.5, 'ATOM threshold', 1e-6)
+  // inconsistent id/maxLeverage: refused
+  const bad = parseMetaResponse({ ...META, universe: [...META.universe, { name: 'ATOM', maxLeverage: 10, marginTableId: 5 }] }, NOW - 60_000) as typeof TABLES
+  const b = adapt(id, { ATOM: 100 }, { tables: bad })
+  assert.equal(b.status, 'not_evaluable')
+  if (b.status === 'not_evaluable') assert.ok(b.reasons.includes('ATOM: margin table 5 implies 5x, asset maxLeverage is 10'))
+  // without ATOM in the universe (the 006G-3 sample): still refused as before
+  assert.equal(adapt(id, { ATOM: 100 }).status, 'not_evaluable')
+})
+
 test('the adapter is pure: inputs untouched, no database or network access needed', () => {
   const accountRow = Object.freeze({ currentCash: 500, marginUsed: 166.66666666666666 })
   const positionRows = Object.freeze([Object.freeze({ symbol: 'BTC', market: 'CRYPTO', quantity: 5, avgCost: 100, leverage: 3, side: 'SHORT', margin: 166.66666666666666 })])

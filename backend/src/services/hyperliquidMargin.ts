@@ -88,6 +88,31 @@ export interface CrossState {
 
 const valid = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v > 0
 
+/**
+ * Margin table ids below this have no entry in `marginTables`: Hyperliquid
+ * documents them as a single tier whose max leverage is the id
+ * (docs, Trading > Margin tiers: "For IDs < 50, there is a single tier with
+ * max leverage equal to ID").
+ */
+export const SINGLE_TIER_ID_LIMIT = 50
+
+/**
+ * The documented single tier of a margin table id below 50. Refused when the
+ * id is not an integer in 1-49 or does not match the asset's maxLeverage.
+ */
+export function singleTierFromId(
+  marginTableId: number,
+  maxLeverage: number,
+): { tiers: MarginTier[] } | { error: string } {
+  if (!Number.isInteger(marginTableId) || marginTableId < 1 || marginTableId >= SINGLE_TIER_ID_LIMIT) {
+    return { error: `margin table ${marginTableId} is not a single-tier id (integer 1-${SINGLE_TIER_ID_LIMIT - 1})` }
+  }
+  if (marginTableId !== maxLeverage) {
+    return { error: `margin table ${marginTableId} implies ${marginTableId}x, asset maxLeverage is ${maxLeverage}` }
+  }
+  return { tiers: [{ lowerBound: 0, maxLeverage: marginTableId }] }
+}
+
 /** Tiers of a coin from the meta endpoint response, or an explanation. */
 export function tiersFromMeta(
   meta: {
@@ -100,9 +125,13 @@ export function tiersFromMeta(
   if (!asset) return { error: `${coin} not in meta universe` }
   const table = meta.marginTables.find(([id]) => id === asset.marginTableId)
   if (!table) {
-    // Some assets reference an id with no table in the response: the rule
-    // for them is not documented, so it is not guessed here.
-    return { error: `${coin}: margin table ${asset.marginTableId} not in meta response` }
+    if (asset.marginTableId === undefined) return { error: `${coin}: marginTableId missing` }
+    // ids from 50 up must come with their table; below 50 the documented single tier
+    if (asset.marginTableId >= SINGLE_TIER_ID_LIMIT) {
+      return { error: `${coin}: margin table ${asset.marginTableId} not in meta response` }
+    }
+    const single = singleTierFromId(asset.marginTableId, asset.maxLeverage)
+    return 'error' in single ? { error: `${coin}: ${single.error}` } : single
   }
   const tiers = table[1].marginTiers.map((t) => ({ lowerBound: Number(t.lowerBound), maxLeverage: t.maxLeverage }))
   return { tiers }

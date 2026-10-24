@@ -80,11 +80,23 @@ const finalCapital = (input: CrossInput, coin: string, price: number) => {
 
 // --- official tables -------------------------------------------------------------
 
-test('tiers come from the meta sample; a missing table is refused, not guessed', () => {
+test('tiers come from the meta sample; ids below 50 give the documented single tier', () => {
   assert.deepEqual(TIERS.BTC, [{ lowerBound: 0, maxLeverage: 40 }, { lowerBound: 150_000_000, maxLeverage: 20 }])
   assert.deepEqual(TIERS.BNB, [{ lowerBound: 0, maxLeverage: 10 }, { lowerBound: 3_000_000, maxLeverage: 5 }])
-  assert.deepEqual(tiersFromMeta(META, 'NOTABLE'), { error: 'NOTABLE: margin table 3 not in meta response' })
+  assert.deepEqual(tiersFromMeta(META, 'NOTABLE'), { tiers: [{ lowerBound: 0, maxLeverage: 3 }] })
   assert.deepEqual(tiersFromMeta(META, 'XYZ'), { error: 'XYZ not in meta universe' })
+  const other = (u: { name: string; maxLeverage: number; marginTableId?: number }) => ({ ...META, universe: [u] })
+  assert.deepEqual(tiersFromMeta(other({ name: 'A', maxLeverage: 10, marginTableId: 5 }), 'A'), {
+    error: 'A: margin table 5 implies 5x, asset maxLeverage is 10',
+  })
+  for (const id of [0, -3, 2.5]) {
+    const r = tiersFromMeta(other({ name: 'A', maxLeverage: id, marginTableId: id }), 'A')
+    assert.deepEqual(r, { error: `A: margin table ${id} is not a single-tier id (integer 1-49)` })
+  }
+  assert.deepEqual(tiersFromMeta(other({ name: 'A', maxLeverage: 5 }), 'A'), { error: 'A: marginTableId missing' })
+  assert.deepEqual(tiersFromMeta(other({ name: 'A', maxLeverage: 50, marginTableId: 50 }), 'A'), {
+    error: 'A: margin table 50 not in meta response',
+  })
 })
 
 test('maintenance rate is half the initial margin at max leverage; deductions keep it continuous', () => {

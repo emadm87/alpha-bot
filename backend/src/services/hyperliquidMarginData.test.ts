@@ -6,7 +6,8 @@
  * MAC is a fixed excerpt of the public `metaAndAssetCtxs` response read on
  * 2026-10-24 00:10 UTC (universe entries, their contexts in the same order,
  * and the margin tables they use): BTC, ETH, SOL, BNB, DOGE, XRP, ATOM
- * (table 5, not in the response) and MATIC (delisted). The network is
+ * (table 5, not in the response: single tier 5x, Task 006G-5) and MATIC
+ * (delisted). The network is
  * disabled: every request goes through injected fetch functions.
  */
 import { test } from 'node:test'
@@ -132,9 +133,6 @@ test('missing, zero, negative or non-numeric mark price: incomplete, never the m
 })
 
 test('margin information missing or invalid: unsupported, tables not invented', () => {
-  const tables = tablesOf()
-  assert.deepEqual(evaluateCoin('ATOM', marksOf(), tables, { now: T }).issues, ['ATOM: margin table 5 not available'])
-  assert.equal(evaluateCoin('ATOM', marksOf(), tables, { now: T }).status, 'unsupported')
   const raw = clone(MAC)
   ;(raw[0] as any).marginTables[5][1].marginTiers = [{ lowerBound: '10.0', maxLeverage: 40 }]
   const broken = tablesOf(raw)
@@ -263,13 +261,13 @@ test('timeout, HTTP error, invalid JSON and unreachable service', async () => {
 test('account not evaluable when any coin is not valid: no input, reasons listed', () => {
   const positions = [
     { coin: 'BTC', side: 'LONG' as const, size: 0.01, entryPrice: 81000 },
-    { coin: 'ATOM', side: 'SHORT' as const, size: 10, entryPrice: 1.7 },
+    { coin: 'XYZ', side: 'SHORT' as const, size: 10, entryPrice: 1.7 },
   ]
   const p = prepareCrossInput({ collateral: 1000, positions, marks: marksOf(), tables: tablesOf(), now: T + 1000 })
   assert.equal(p.status, 'not_evaluable')
   assert.ok(!('input' in p))
   if (p.status === 'not_evaluable') {
-    assert.deepEqual(p.reasons, ['ATOM unsupported', 'ATOM: margin table 5 not available'])
+    assert.deepEqual(p.reasons, ['XYZ unsupported', 'XYZ not in the meta universe'])
   }
   const stale = prepareCrossInput({ collateral: 1000, positions: positions.slice(0, 1), marks: marksOf(), tables: tablesOf(), now: T + 120_000 })
   assert.equal(stale.status, 'not_evaluable')
@@ -284,4 +282,168 @@ test('inputs are not modified', () => {
   const marks = marksOf(raw)
   prepareCrossInput({ collateral: 1000, positions: [{ coin: 'BTC', side: 'LONG', size: 0.01, entryPrice: 81000 }], marks, tables, now: T })
   assert.deepEqual(raw, copy)
+})
+
+// --- margin table ids below 50 (Task 006G-5) -------------------------------------
+// Hyperliquid docs, Trading > Margin tiers: "For IDs < 50, there is a single
+// tier with max leverage equal to ID". Ids from 50 up need their listed table.
+
+const { maintenanceMargin, singleTierFromId } = await import('./hyperliquidMargin.js')
+/** META with one universe entry changed (or added) for coin. */
+function withAsset(entry: Record<string, unknown>, tablesPatch?: (t: unknown[]) => void) {
+  const raw = clone(MAC)
+  const universe = (raw[0] as any).universe as Record<string, unknown>[]
+  const i = universe.findIndex((u) => u.name === entry.name)
+  if (i >= 0) universe[i] = { szDecimals: 2, ...entry }
+  else {
+    universe.push({ szDecimals: 2, ...entry })
+    ;(raw[1] as unknown[]).push({ markPx: '2.0' })
+  }
+  tablesPatch?.((raw[0] as any).marginTables)
+  return raw
+}
+
+test('ATOM (id 5, maxLeverage 5, no listed table): single 5x tier, valid', () => {
+  const atom = evaluateCoin('ATOM', marksOf(), tablesOf(), { now: T + 1000 })
+  assert.equal(atom.status, 'valid', String(atom.issues))
+  assert.deepEqual(atom.tiers, [{ lowerBound: 0, maxLeverage: 5 }])
+  assert.equal(atom.maxLeverage, 5)
+  assert.equal(atom.markPrice, 1.6939)
+  assert.deepEqual(singleTierFromId(5, 5), { tiers: [{ lowerBound: 0, maxLeverage: 5 }] })
+})
+
+test('ATOM maintenance margin on 1,000 USDC notional is 100 USDC (mmr 1/(2*5))', () => {
+  const tiers = evaluateCoin('ATOM', marksOf(), tablesOf(), { now: T }).tiers!
+  const m = maintenanceMargin(1000, tiers)
+  assert.ok(Math.abs(m.margin - 100) < 1e-9, String(m.margin))
+  assert.equal(m.mmr, 0.1)
+  assert.equal(m.deduction, 0)
+})
+
+test('id below 50 that does not match maxLeverage: refused', () => {
+  const c = evaluateCoin('ATOM', marksOf(), tablesOf(withAsset({ name: 'ATOM', maxLeverage: 10, marginTableId: 5 })), { now: T })
+  assert.equal(c.status, 'unsupported')
+  assert.deepEqual(c.tiers, null)
+  assert.deepEqual(c.issues, ['ATOM: margin table 5 implies 5x, asset maxLeverage is 10'])
+})
+
+test('id zero, negative, decimal or missing: refused', () => {
+  for (const id of [0, -5, 2.5, '7.5']) {
+    const raw = withAsset({ name: 'ATOM', maxLeverage: Number(id), marginTableId: id })
+    const c = evaluateCoin('ATOM', marksOf(raw), tablesOf(raw), { now: T })
+    assert.equal(c.status, 'unsupported', String(id))
+    assert.deepEqual(c.issues, [`ATOM: margin table ${Number(id)} is not a single-tier id (integer 1-49)`])
+  }
+  for (const id of [undefined, null, '', 'abc']) {
+    const raw = withAsset({ name: 'ATOM', maxLeverage: 5, marginTableId: id })
+    assert.deepEqual(parseMetaResponse(raw, T), { error: 'ATOM: maxLeverage or marginTableId missing' })
+  }
+})
+
+test('id 50 or above without a listed table: refused', () => {
+  for (const id of [50, 57, 99]) {
+    const c = evaluateCoin('ATOM', marksOf(), tablesOf(withAsset({ name: 'ATOM', maxLeverage: 5, marginTableId: id })), { now: T })
+    assert.equal(c.status, 'unsupported')
+    assert.deepEqual(c.issues, [`ATOM: margin table ${id} not available`])
+  }
+  // BTC without its table 56
+  const noBtc = withAsset({ name: 'BTC', maxLeverage: 40, marginTableId: 56 }, (t) => t.splice(5, 1))
+  assert.deepEqual(evaluateCoin('BTC', marksOf(noBtc), tablesOf(noBtc), { now: T }).issues, ['BTC: margin table 56 not available'])
+})
+
+test('id 50 or above with a valid listed table: used as listed', () => {
+  const raw = withAsset({ name: 'NEW', maxLeverage: 3, marginTableId: 60 }, (t) =>
+    t.push([60, { marginTiers: [{ lowerBound: '0.0', maxLeverage: 3 }, { lowerBound: '1000000.0', maxLeverage: 2 }] }]))
+  const c = evaluateCoin('NEW', marksOf(raw), tablesOf(raw), { now: T })
+  assert.equal(c.status, 'valid', String(c.issues))
+  assert.deepEqual(c.tiers, [{ lowerBound: 0, maxLeverage: 3 }, { lowerBound: 1_000_000, maxLeverage: 2 }])
+})
+
+test('malformed listed table: refused, never replaced by a presumed single tier', () => {
+  // a listed table for an id below 50 that fails validation
+  const raw = withAsset({ name: 'ATOM', maxLeverage: 5, marginTableId: 5 }, (t) =>
+    t.push([5, { marginTiers: [{ lowerBound: '10.0', maxLeverage: 5 }] }]))
+  const tables = tablesOf(raw)
+  assert.ok(tables.issues.includes('margin table 5 rejected: first tier does not start at 0'))
+  const c = evaluateCoin('ATOM', marksOf(raw), tables, { now: T })
+  assert.equal(c.status, 'unsupported')
+  assert.deepEqual(c.issues, ['ATOM: margin table 5 rejected: first tier does not start at 0'])
+  // a listed table for an id below 50 that disagrees with maxLeverage
+  const other = withAsset({ name: 'ATOM', maxLeverage: 5, marginTableId: 5 }, (t) =>
+    t.push([5, { marginTiers: [{ lowerBound: '0.0', maxLeverage: 4 }] }]))
+  const o = evaluateCoin('ATOM', marksOf(other), tablesOf(other), { now: T })
+  assert.equal(o.status, 'incomplete')
+  assert.match(o.issues[0]!, /differs from tier 0/)
+  // a malformed table with id 50 or above
+  const btc = withAsset({ name: 'BTC', maxLeverage: 40, marginTableId: 56 }, (t) => {
+    ;(t[5] as any)[1].marginTiers = [{ lowerBound: '0.0', maxLeverage: 'x' }]
+  })
+  assert.equal(evaluateCoin('BTC', marksOf(btc), tablesOf(btc), { now: T }).status, 'unsupported')
+})
+
+test('single-tier asset still refused when delisted, without mark price or stale', () => {
+  const delisted = withAsset({ name: 'ATOM', maxLeverage: 5, marginTableId: 5, isDelisted: true })
+  assert.deepEqual(evaluateCoin('ATOM', marksOf(delisted), tablesOf(delisted), { now: T }).issues, ['ATOM is delisted'])
+  const noMark = clone(MAC)
+  ;(noMark[1] as any)[6].markPx = null
+  assert.equal(evaluateCoin('ATOM', marksOf(noMark), tablesOf(noMark), { now: T }).status, 'incomplete')
+  const positions = [{ coin: 'ATOM', side: 'SHORT' as const, size: 100, entryPrice: 1.7, leverage: 5 }]
+  for (const p of [
+    prepareCrossInput({ collateral: 1000, positions, marks: marksOf(noMark), tables: tablesOf(noMark), now: T }),
+    prepareCrossInput({ collateral: 1000, positions, marks: marksOf(), tables: tablesOf(), now: T + 120_000 }),
+    prepareCrossInput({ collateral: 1000, positions, marks: marksOf(), tables: tablesOf(), now: T + 25 * 3_600_000 }),
+  ]) assert.equal(p.status, 'not_evaluable')
+})
+
+test('the six main coins keep their listed tables', () => {
+  const tables = tablesOf()
+  const listed: Record<number, unknown> = Object.fromEntries(
+    (META.marginTables as [number, { marginTiers: { lowerBound: string; maxLeverage: number }[] }][]).map(([id, t]) => [
+      id, t.marginTiers.map((x) => ({ lowerBound: Number(x.lowerBound), maxLeverage: x.maxLeverage })),
+    ]),
+  )
+  for (const coin of SIX) {
+    const asset = META.universe.find((u) => u.name === coin)!
+    assert.ok(asset.marginTableId >= 50)
+    assert.deepEqual(evaluateCoin(coin, marksOf(), tables, { now: T }).tiers, listed[asset.marginTableId], coin)
+  }
+})
+
+test('prepareCrossInput with BTC and ATOM: ready, ATOM margined at 5x tier', () => {
+  const positions = [
+    { coin: 'BTC', side: 'LONG' as const, size: 0.01, entryPrice: 81000, leverage: 2 },
+    { coin: 'ATOM', side: 'SHORT' as const, size: 590.35, entryPrice: 1.6939, leverage: 5 },
+  ]
+  const p = prepareCrossInput({ collateral: 1000, positions, marks: marksOf(), tables: tablesOf(), now: T + 1000 })
+  assert.equal(p.status, 'ready')
+  if (p.status !== 'ready') return
+  assert.deepEqual(p.input.tiers.ATOM, [{ lowerBound: 0, maxLeverage: 5 }])
+  const s = crossState(p.input)
+  const atom = s.positions.find((x) => x.coin === 'ATOM')!
+  assert.ok(Math.abs(atom.maintenanceMargin! - 590.35 * 1.6939 * 0.1) < 1e-9)
+  assert.ok(liquidationPrice(p.input, 'ATOM').price! > 1.6939)
+})
+
+test('margin table diff follows the single tier of an id below 50', () => {
+  const before = tablesOf()
+  const after = tablesOf(withAsset({ name: 'ATOM', maxLeverage: 3, marginTableId: 3 }))
+  assert.deepEqual(diffMarginTables(before, after, ['ATOM']), [
+    'ATOM: maxLeverage 5 -> 3',
+    'ATOM: margin table 5 -> 3',
+    'ATOM: tiers [{"lowerBound":0,"maxLeverage":5}] -> [{"lowerBound":0,"maxLeverage":3}]',
+  ])
+})
+
+test('single-tier inputs are not modified', () => {
+  const raw = clone(MAC)
+  const copy = clone(raw)
+  const tables = tablesOf(raw)
+  const marks = marksOf(raw)
+  const positions = [{ coin: 'ATOM', side: 'LONG' as const, size: 10, entryPrice: 1.7, leverage: 5 }]
+  const positionsCopy = clone(positions)
+  const p = prepareCrossInput({ collateral: 1000, positions, marks, tables, now: T })
+  assert.equal(p.status, 'ready')
+  assert.deepEqual(raw, copy)
+  assert.deepEqual(positions, positionsCopy)
+  assert.equal(tables.tables.has(5), false) // the single tier is not stored as a listed table
 })

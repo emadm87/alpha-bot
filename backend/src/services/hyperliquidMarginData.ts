@@ -14,9 +14,17 @@
  * measured from the time the response was received.
  * A coin without a valid mark price, with a missing or stale table, or not
  * supported, is never evaluated: no last/mid price is used in its place.
+ * Margin table ids below 50 are not listed in `marginTables`: Hyperliquid
+ * documents them as a single tier with max leverage equal to the id.
  */
 import { getAssetContext, type AssetContext } from './hyperliquid.js'
-import type { CrossInput, CrossPosition, MarginTier } from './hyperliquidMargin.js'
+import {
+  SINGLE_TIER_ID_LIMIT,
+  singleTierFromId,
+  type CrossInput,
+  type CrossPosition,
+  type MarginTier,
+} from './hyperliquidMargin.js'
 import { TICKER_MAX_AGE_MS } from './quantData.js'
 
 export const INFO_URL = 'https://api.hyperliquid.xyz/info'
@@ -35,6 +43,8 @@ export interface MarginTables {
   receivedAt: number
   assets: Map<string, AssetMeta>
   tables: Map<number, MarginTier[]>
+  /** Ids of the tables rejected while parsing, with the reason. */
+  rejected: Map<number, string>
   /** Tables rejected while parsing, with the reason. */
   issues: string[]
 }
@@ -109,6 +119,7 @@ export function parseMetaResponse(raw: unknown, receivedAt: number): MarginTable
     assets.set(u.name, { coin: u.name, maxLeverage, marginTableId, delisted: u.isDelisted === true })
   }
   const tables = new Map<number, MarginTier[]>()
+  const rejected = new Map<number, string>()
   const issues: string[] = []
   for (const entry of meta.marginTables) {
     const id = Array.isArray(entry) ? num(entry[0]) : null
@@ -117,10 +128,12 @@ export function parseMetaResponse(raw: unknown, receivedAt: number): MarginTable
       continue
     }
     const tiers = parseTiers(entry[1])
-    if (typeof tiers === 'string') issues.push(`margin table ${id} rejected: ${tiers}`)
-    else tables.set(id, tiers)
+    if (typeof tiers === 'string') {
+      issues.push(`margin table ${id} rejected: ${tiers}`)
+      rejected.set(id, tiers)
+    } else tables.set(id, tiers)
   }
-  return { receivedAt, assets, tables, issues }
+  return { receivedAt, assets, tables, rejected, issues }
 }
 
 /** Mark prices of a `metaAndAssetCtxs` response, matched to universe by index. */
@@ -178,6 +191,20 @@ export function marksFromAssetContexts(
   return out
 }
 
+/**
+ * Tiers of an asset: its explicit table, or the documented single tier for
+ * an id below 50. A listed table that failed validation is never replaced.
+ */
+function tiersOf(asset: AssetMeta, tables: MarginTables): { tiers: MarginTier[] } | { error: string } {
+  const id = asset.marginTableId
+  const explicit = tables.tables.get(id)
+  if (explicit) return { tiers: explicit }
+  const rejected = tables.rejected.get(id)
+  if (rejected !== undefined) return { error: `margin table ${id} rejected: ${rejected}` }
+  if (id >= SINGLE_TIER_ID_LIMIT) return { error: `margin table ${id} not available` }
+  return singleTierFromId(id, asset.maxLeverage)
+}
+
 /** Whether one coin can be evaluated, and with which mark price and tiers. */
 export function evaluateCoin(
   coin: string,
@@ -193,10 +220,9 @@ export function evaluateCoin(
   const asset = tables.assets.get(coin)
   if (!asset) return { ...base, status: 'unsupported', issues: [`${coin} not in the meta universe`] }
   if (asset.delisted) return { ...base, status: 'unsupported', issues: [`${coin} is delisted`] }
-  const tiers = tables.tables.get(asset.marginTableId)
-  if (!tiers) {
-    return { ...base, status: 'unsupported', issues: [`${coin}: margin table ${asset.marginTableId} not available`] }
-  }
+  const resolved = tiersOf(asset, tables)
+  if ('error' in resolved) return { ...base, status: 'unsupported', issues: [`${coin}: ${resolved.error}`] }
+  const tiers = resolved.tiers
   const withTiers = { ...base, tiers, maxLeverage: asset.maxLeverage }
   if (tiers[0]!.maxLeverage !== asset.maxLeverage) {
     return { ...withTiers, status: 'incomplete', issues: [`${coin}: maxLeverage ${asset.maxLeverage} differs from tier 0 (${tiers[0]!.maxLeverage})`] }
@@ -266,8 +292,12 @@ export function diffMarginTables(prev: MarginTables, next: MarginTables, coins: 
     if (a.maxLeverage !== b.maxLeverage) changes.push(`${coin}: maxLeverage ${a.maxLeverage} -> ${b.maxLeverage}`)
     if (a.delisted !== b.delisted) changes.push(`${coin}: delisted ${a.delisted} -> ${b.delisted}`)
     if (a.marginTableId !== b.marginTableId) changes.push(`${coin}: margin table ${a.marginTableId} -> ${b.marginTableId}`)
-    const ta = JSON.stringify(prev.tables.get(a.marginTableId) ?? null)
-    const tb = JSON.stringify(next.tables.get(b.marginTableId) ?? null)
+    const tiers = (t: MarginTables, asset: AssetMeta) => {
+      const r = tiersOf(asset, t)
+      return 'tiers' in r ? r.tiers : null
+    }
+    const ta = JSON.stringify(tiers(prev, a))
+    const tb = JSON.stringify(tiers(next, b))
     if (ta !== tb) changes.push(`${coin}: tiers ${ta} -> ${tb}`)
   }
   return changes
