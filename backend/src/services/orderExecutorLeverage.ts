@@ -36,6 +36,33 @@ function roundQuantity(value: number): number {
   return Number(value.toFixed(6))
 }
 
+/** Absolute tolerance between account.marginUsed and the rows' margin. */
+const MARGIN_EPS = 1e-6
+
+/**
+ * Why the margin of a perpetual row written before 006G-4 (margin NULL)
+ * cannot be trusted, or null when it can. Such a row rebuilds its margin as
+ * quantity * avgCost / leverage, which is wrong when its fills used
+ * different leverages. It is trusted only when the account's perpetual rows
+ * above 1x rebuild account.marginUsed; the missing margin is never guessed.
+ */
+export function legacyMarginIssue(
+  marginUsed: number,
+  rows: Pick<Position, 'symbol' | 'quantity' | 'avgCost' | 'leverage' | 'side' | 'margin'>[],
+): string | null {
+  const perps = rows.filter((r) => r.side && r.quantity > 0)
+  const legacy = perps.filter((r) => r.margin === null)
+  if (legacy.length === 0) return null
+  const rebuilt = perps
+    .filter((r) => r.leverage > 1)
+    .reduce((sum, r) => sum + positionMargin(r), 0)
+  if (Math.abs(rebuilt - marginUsed) <= MARGIN_EPS) return null
+  return (
+    `margin not recorded for ${legacy.map((r) => r.symbol).join(', ')} (rows written before 006G-4) ` +
+    `and not reconcilable: the perpetual rows give ${rebuilt}, account marginUsed is ${marginUsed}`
+  )
+}
+
 /** Calculate accumulated interest since the last calculation. */
 export function calculatePositionInterest(position: Position): number {
   if (!position.lastInterestTime || position.leverage <= 1) return 0
@@ -139,6 +166,25 @@ export async function placeAndExecuteCrypto(params: {
         ),
       )
       .get()
+
+    // A perpetual would overwrite a spot holding (side null, from
+    // orderMatching) on the same row: refused until the holding is closed.
+    if ((side === 'LONG' || side === 'SHORT') && pos && !pos.side && pos.quantity > 0) {
+      throw new Error(
+        `Cannot open ${side} on ${symbol}: it holds a spot position of ${pos.quantity} on the same row. Close the spot position first.`,
+      )
+    }
+
+    // An older perpetual whose margin cannot be rebuilt would close or grow
+    // with a wrong margin, creating or destroying cash: refused.
+    if (pos && pos.side && pos.quantity > 0 && pos.margin === null) {
+      const booked = tx.select().from(accounts).where(eq(accounts.id, account.id)).get()
+      const issue = legacyMarginIssue(
+        booked?.marginUsed ?? account.marginUsed,
+        tx.select().from(positions).where(eq(positions.accountId, account.id)).all(),
+      )
+      if (issue) throw new Error(`Cannot ${side} ${symbol}: ${issue}`)
+    }
 
     let currentCash = account.currentCash
     let marginUsed = account.marginUsed

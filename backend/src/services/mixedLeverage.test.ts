@@ -256,7 +256,7 @@ test('11. older row with a reconstructable margin (single leverage): closes exac
   await check(id, 'O', 90, 'closed', { cash: 1000 - 0.21 + 30 - 0.189, margin: null, marginUsed: 0, quantity: 0 })
 })
 
-test('12. older row built from mixed leverages without a recorded margin: not reconstructable (documented)', async () => {
+test('12. older row built from mixed leverages without a recorded margin: not reconstructable, close refused (006G-6A)', async () => {
   const id = newAccount()
   await trade(id, 'P', 'LONG', 3, 3, 100)
   await trade(id, 'P', 'LONG', 3, 2, 100)
@@ -267,9 +267,12 @@ test('12. older row built from mixed leverages without a recorded margin: not re
   near(rebuilt, 300, 'rebuilt from the row')
   near(a.marginUsed, 250, 'actually posted (marginUsed)')
   // accountRisk and the Hyperliquid adapter refuse this account (see their tests);
-  // the engine itself still falls back to the old formula for such a row
-  await trade(id, 'P', 'SELL', 6, 2, 100)
-  near(account(id).currentCash, 1049.16, 'old behaviour kept for an unrecorded row')
+  // the engine refuses the close too: the old formula would release 300 and
+  // end at 1049.16 instead of 999.16 (50 USDC created)
+  const cash = a.currentCash
+  await assert.rejects(trade(id, 'P', 'SELL', 6, 2, 100), /margin not recorded for P .* not reconcilable/)
+  near(account(id).currentCash, cash, 'cash untouched')
+  near(position(id, 'P').quantity, 6, 'position untouched')
 })
 
 test('13. spot rows are not touched: no margin recorded, manual buy and sell unchanged', async () => {
