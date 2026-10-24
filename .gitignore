@@ -156,3 +156,6 @@ backend/.DS_Store
 *.db-wal
 *.db-shm
 *.db.bak
+
+# Pilot AI runs (database, log, trace: private, never committed)
+backend/pilot/runs/

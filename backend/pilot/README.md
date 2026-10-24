@@ -1,0 +1,174 @@
+# Pilota AI forward — ALPHA BOT
+
+Strumenti per la prima prova forward dell'AI originale con **1.000 USDC simulati**.
+Preflight completato nel Task 006G-6D; **la simulazione non è ancora stata eseguita**.
+
+> ⚠️ `run-pilot.mjs --authorized` avvia l'app e fa **chiamate AI a pagamento**.
+> Usarlo solo dopo un'autorizzazione esplicita, separata per il pilota (12 cicli) e per la prova da 24 h.
+> Senza `--authorized` stampa il piano ed esce senza fare nulla.
+
+Nessun trading reale: ccxt è creato senza credenziali e il motore scrive solo su SQLite.
+Gli script non modificano codice, prompt, strategie, sizing, leva, monitor o liquidazioni.
+
+## File
+
+| File | Ruolo |
+|---|---|
+| `run-pilot.mjs` | Avvio sorvegliato dell'app con arresto automatico, poi report |
+| `check-run.mjs` | Controllo di `backend.log` e della traccia 006B (sola lettura) |
+| `report.mjs` | Report economico dal database (aperto in sola lettura) e dalla traccia |
+| `ccxt-proxy.mjs` | Shim di trasporto: aggiunge solo `httpsProxy` a ccxt (serve solo con proxy HTTPS obbligatorio) |
+| `test/selftest.mjs` | Verifica offline di tutti gli script (nessuna rete, nessuna AI) |
+| `test/build-synthetic.mts` | Database SINTETICO generato dal motore reale, solo per i test |
+| `test/fake-backend.mjs` | Finto backend per testare il launcher, solo per i test |
+
+## Requisiti
+
+- Node.js 22 (verificato con v22.22.0) e le dipendenze del monorepo: dalla radice `pnpm install`.
+  Gli script usano `backend/node_modules` (`better-sqlite3`, `ccxt`, `tsx`).
+- Rete verso `api.hyperliquid.xyz` (prezzi), il feed RSS CoinJournal (notizie) e
+  `generativelanguage.googleapis.com` (Gemini).
+- Porta locale libera (default `5611`).
+
+Verifica offline prima di ogni pilota (da `backend/`):
+
+```bash
+node pilot/test/selftest.mjs        # atteso: 12/12 verifiche superate
+```
+
+## 1. Database separato
+
+Il launcher crea **sempre** un database nuovo in `--run-dir` e rifiuta una cartella non vuota.
+Non riusa né modifica `backend/data.db` o database di prove precedenti.
+Usare `pilot/runs/<data>` (ignorata da git) o una cartella fuori dal repository.
+
+L'app all'avvio esegue il seed originale (utente `default` e conto "GPT" da 10.000 con chiave segnaposto,
+che l'AI salta). Il launcher crea poi **un solo** conto AI da 1.000 USDC con `POST /api/account`:
+è questa chiamata ad avviare il ciclo 1. Non usare la dashboard né altre API durante la prova:
+ogni salvataggio di un conto avvia un ciclo in più.
+
+## 2. Chiave API senza esporla
+
+**Claude Code cloud (Network Secret).** Configurare nell'ambiente un Network Secret per
+`generativelanguage.googleapis.com` con intestazione `Authorization: Bearer`. Il proxy inserisce la
+chiave: il conto usa il segnaposto `network-secret-placeholder` (default `--key-mode network-secret`),
+quindi la chiave non entra mai in database, log o traccia.
+
+**PC di casa (nessun proxy).** Il Network Secret non esiste: la chiave va passata in una variabile
+d'ambiente e il launcher la mette nel conto (`--key-mode env --key-env GEMINI_API_KEY`).
+La chiave resta nel database della prova solo durante l'esecuzione: a fine prova il launcher la
+sostituisce con `redacted-after-run`. La traccia 006B la maschera sempre.
+
+```powershell
+# Windows PowerShell 7+: chiave solo per la sessione corrente, mai salvata in file
+$env:GEMINI_API_KEY = Read-Host -MaskInput "Gemini API key"
+```
+```bash
+# Linux/macOS
+read -rs GEMINI_API_KEY && export GEMINI_API_KEY
+```
+
+Non scrivere mai la chiave in file, comandi salvati nella cronologia o messaggi.
+
+## 3. Avvio del pilota (solo dopo autorizzazione)
+
+Da `backend/`:
+
+```bash
+# Claude Code cloud (proxy obbligatorio: lo shim si attiva da solo con HTTPS_PROXY)
+node pilot/run-pilot.mjs --authorized --run-dir pilot/runs/pilot-AAAAMMGG-HHMM
+
+# PC di casa
+node pilot/run-pilot.mjs --authorized --run-dir pilot/runs/pilot-AAAAMMGG-HHMM --key-mode env --proxy-shim off
+```
+
+Parametri fissi del pilota: modello `gemini-3.5-flash-lite`, base URL
+`https://generativelanguage.googleapis.com/v1beta/openai`, 12 cicli ogni 300 s (circa 55–60 minuti),
+mercati BTC ETH SOL BNB XRP DOGE del prompt originale, solo perpetual MARKET.
+Per la prova da 24 h (autorizzazione separata): `--cycles 288 --max-attempts 300 --timeout-min 1460`.
+
+Il launcher:
+
+1. rifiuta se manca `--authorized`, se la cartella non è vuota, se la porta è occupata o la chiave manca;
+2. avvia l'app originale (`src/index.ts`) con `DATABASE_PATH`, `AI_DIAGNOSTICS_FILE`, `LOG_LEVEL=info`;
+3. **prima di creare il conto** verifica nel log: exchange inizializzato, prezzi pronti, job AI
+   pianificato a 300 s, monitor a 5 s, nessun ripiego su ordini casuali. Se qualcosa manca si ferma
+   senza alcuna chiamata AI;
+4. crea il conto una sola volta e sorveglia log e traccia ogni 15 s.
+
+## 4. Controllo dello scheduler
+
+L'unica prova valida è la riga dello scheduler:
+
+```
+services.scheduler: Auto trading job reset successfully - interval: 300s
+```
+
+La riga `api.account: Auto trading job reset successfully after account creation` **non** prova nulla:
+viene scritta anche quando il reset è fallito. Controllo manuale in qualunque momento (sola lettura):
+
+```bash
+node pilot/check-run.mjs pilot/runs/<cartella>/backend.log pilot/runs/<cartella>/trace.jsonl
+# 0 = OK, 1 = problemi bloccanti, 2 = da fermare subito
+```
+
+## 5. Arresto
+
+Automatico quando si verifica una di queste condizioni:
+
+- completati i cicli previsti (eventi `outcome` nella traccia);
+- tentativi HTTP verso l'AI oltre `--max-attempts` (l'app ripete fino a 3 tentativi per ciclo);
+- 3 cicli consecutivi senza decisione o con esecuzione fallita;
+- errore 401/403/404, chiamate duplicate (meno di 240 s), chiave nel log o nella traccia;
+- reset dello scheduler fallito, ordini manuali, nessuna chiamata AI entro 6 minuti dalla creazione del conto;
+- timeout (`--timeout-min`, default 62).
+
+Arresto manuale: `Ctrl+C` nel terminale del launcher, che ferma l'app e genera comunque il report.
+L'app gestisce SIGTERM fermando lo scheduler; su Windows il processo termina subito, e le scritture
+SQLite restano atomiche. Conviene fermare subito dopo un ciclo, non durante una chiamata.
+
+## 6. Report economico
+
+Generato automaticamente in `report.json`; a mano (sola lettura):
+
+```bash
+node pilot/report.mjs pilot/runs/<cartella>/pilot.db pilot/runs/<cartella>/trace.jsonl --price-in <USD/1M> --price-out <USD/1M>
+```
+
+Contiene:
+
+- capitale iniziale e finale;
+- P&L lordo, netto, realizzato e non realizzato, in USDC e %;
+- commissioni e interessi addebitati, e a parte quelli maturati ma non addebitati;
+- aperture e chiusure LONG/SHORT, HOLD;
+- chiusure e posizioni vincenti e perdenti;
+- liquidazioni (`LIQ-`);
+- drawdown massimo sui "Total Assets" di ogni ciclo (campionamento 5 min);
+- risultati giornalieri;
+- benchmark HOLD e BTC compra-e-tieni 1x;
+- token e costo AI;
+- anomalie.
+
+Riconciliazione, con ogni costo contato una sola volta:
+`cassa = capitale + P&L realizzato − commissioni − interessi − margine delle posizioni aperte`.
+Il prezzo finale è quello dell'ultimo ciclo (massimo 5 minuti prima dell'arresto); si può forzare
+con `--prices '{"BTC":...}' --at <ISO>`. La curva della dashboard non è usata: non è attendibile
+per SHORT e leva.
+
+## 7. Conservare i risultati
+
+La cartella della prova contiene `pilot.db`, `backend.log`, `trace.jsonl`, `run-meta.json`,
+`check.json` e `report.json`.
+
+- Non pubblicare mai la cartella su git (`pilot/runs/` è ignorata).
+- Conservarla in privato: la traccia contiene prompt, notizie e risposte complete.
+- Per condividere i risultati basta `report.json` (nessuna chiave, nessun prompt).
+
+## Limiti dichiarati della prova
+
+- Il monitor operativo è quello originale (equity/marginUsed < 0,5), non Hyperliquid. Le posizioni 1x,
+  SHORT compreso, non sono monitorate.
+- Interessi dell'autore (0,00125%/h) al posto del funding Hyperliquid.
+- Commissione 0,07% senza slippage né spread, esecuzione all'ultimo prezzo (cache 30 s).
+- Un prezzo mancante salta il ciclo; nell'equity il PnL di quel simbolo vale 0 per quel momento.
+- 12 cicli verificano pipeline e contabilità, non la redditività.
