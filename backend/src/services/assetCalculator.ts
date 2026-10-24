@@ -1,7 +1,7 @@
 /** Port of `services/asset_calculator.py`. */
 import { eq } from 'drizzle-orm'
 import { db } from '../db/client.js'
-import { positions, type Account } from '../db/schema.js'
+import { positions, type Account, type Position } from '../db/schema.js'
 import { getLastPrice } from './marketData.js'
 import { getLogger } from '../utils/logger.js'
 
@@ -63,6 +63,17 @@ export async function calcPositionsMarketValue(
   return total
 }
 
+/**
+ * Margin posted for a position's open quantity. The engine records it since
+ * Task 006G-4; older rows (and spot rows) have none, and then it is rebuilt
+ * as quantity * avgCost / leverage, which is exact only if every fill of the
+ * position used the same leverage.
+ */
+export function positionMargin(p: Pick<Position, 'quantity' | 'avgCost' | 'leverage' | 'margin'>): number {
+  if (p.margin !== null && p.margin !== undefined) return p.margin
+  return (p.quantity * p.avgCost) / (p.leverage > 1 ? p.leverage : 1)
+}
+
 export interface AccountEquity {
   /** Account value: cash + posted margin + unrealized P&L. */
   equity: number
@@ -78,10 +89,10 @@ export interface AccountEquity {
 /**
  * Account equity (account value) = cash + posted margin + unrealized P&L.
  *
- * placeAndExecuteCrypto takes each position's entry margin
- * (quantity * avgCost / leverage, the full entry notional at 1x) and the
- * opening fee out of cash, and gives the same margin back on close, so the
- * margin of every open position is added back here. It is computed per
+ * placeAndExecuteCrypto takes each position's entry margin (the full entry
+ * notional at 1x) and the opening fee out of cash, and gives the same margin
+ * back on close, so the margin of every open position (positionMargin) is
+ * added back here. It is computed per
  * position rather than read from account.marginUsed, which does not cover
  * 1x positions and is not released by liquidations run through
  * orderMatching.
@@ -107,8 +118,7 @@ export async function calcAccountEquity(
 
   for (const p of rows) {
     if (p.quantity <= 0) continue
-    const leverage = p.leverage > 1 ? p.leverage : 1
-    postedMargin += (p.quantity * p.avgCost) / leverage
+    postedMargin += positionMargin(p)
 
     try {
       const price = await getLastPrice(p.symbol, p.market)

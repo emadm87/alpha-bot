@@ -18,7 +18,7 @@
 import { and, asc, eq } from 'drizzle-orm'
 import { db } from '../db/client.js'
 import { accounts, positions, trades, type Position } from '../db/schema.js'
-import { calcAccountEquity } from './assetCalculator.js'
+import { calcAccountEquity, positionMargin } from './assetCalculator.js'
 import { getAssetContext } from './hyperliquid.js'
 import { getLastPrice } from './marketData.js'
 import { calculatePositionInterest } from './orderExecutorLeverage.js'
@@ -211,7 +211,7 @@ export async function getAccountRiskSnapshot(
     const leverage = pos.leverage > 1 ? pos.leverage : 1
     const side = pos.side === 'SHORT' ? 'SHORT' : pos.side === 'LONG' ? 'LONG' : 'SPOT'
     const sign = side === 'SHORT' ? -1 : 1
-    const margin = (pos.quantity * pos.avgCost) / leverage
+    const margin = positionMargin(pos)
     const pnl = price === null ? null : sign * pos.quantity * (price - pos.avgCost)
     const history = positionHistory(accountId, pos)
     if (history.issue) posIssues.push(history.issue)
@@ -264,7 +264,11 @@ export async function getAccountRiskSnapshot(
   })
 
   // Consistency checks against the booked figures
-  const leveragedMargin = leveraged.reduce((s, p) => s + (p.quantity * p.avgCost) / p.leverage, 0)
+  const leveragedMargin = leveraged.reduce((s, p) => s + positionMargin(p), 0)
+  const unrecorded = open.filter((p) => p.side && p.margin === null).map((p) => p.symbol)
+  if (unrecorded.length > 0) {
+    issues.push(`margin not recorded for ${unrecorded.join(', ')} (rows written before 006G-4): rebuilt as quantity * avgCost / leverage`)
+  }
   if (Math.abs(leveragedMargin - marginUsed) > EPS) {
     issues.push(`account marginUsed ${marginUsed} differs from the leveraged positions' margin ${leveragedMargin}`)
   }

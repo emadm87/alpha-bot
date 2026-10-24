@@ -328,14 +328,28 @@ test('12-13. consistent with calcAccountEquity, no margin or notional counted tw
   assert.deepEqual(s.issues, [])
 })
 
-test('existing inconsistency: adding at another leverage makes marginUsed differ from the positions', async () => {
+test('adding at another leverage: the recorded margin matches marginUsed (006G-4)', async () => {
   const id = newAccount()
   await trade(id, 'XMIX', 'LONG', 3, 3, 80) // margin 80
-  await trade(id, 'XMIX', 'LONG', 3, 2, 80) // margin 120 -> marginUsed 200, leverage trunc(2.5) = 2
+  await trade(id, 'XMIX', 'LONG', 3, 2, 80) // margin 120 -> 200 posted
   const s = await snap(id)
   near(s.booked.marginUsed, 200, 'booked marginUsed')
-  near(pos(s, 'XMIX').margin, 240, 'quantity * avgCost / truncated leverage')
+  near(pos(s, 'XMIX').margin, 200, 'recorded margin')
+  assert.equal(pos(s, 'XMIX').leverage, 3) // effective 480 / 200 = 2.4, rounded up
+  assert.deepEqual(s.issues, [])
+  assert.equal(s.reliable, true)
+})
+
+test('older row without a recorded margin and an inconsistent marginUsed is flagged', async () => {
+  const id = newAccount()
+  await trade(id, 'XOLD', 'LONG', 3, 3, 80)
+  await trade(id, 'XOLD', 'LONG', 3, 2, 80)
+  // as written before 006G-4: no margin, leverage truncated to 2
+  rawDb.prepare('UPDATE positions SET margin = NULL, leverage = 2 WHERE account_id = ?').run(id)
+  const s = await snap(id)
+  near(pos(s, 'XOLD').margin, 240, 'rebuilt as quantity * avgCost / leverage')
   assert.ok(s.issues.some((i) => i.startsWith('account marginUsed 200 differs')))
+  assert.ok(s.issues.some((i) => i.startsWith('margin not recorded for XOLD')))
   assert.equal(s.reliable, false)
 })
 

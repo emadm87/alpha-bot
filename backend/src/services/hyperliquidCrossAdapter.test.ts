@@ -217,14 +217,22 @@ test('9. booked marginUsed that the rows do not rebuild: not evaluable', async (
   assert.ok(!('input' in r))
 })
 
-test('10. fills at different leverages merged into one row, and manual leveraged rows: not evaluable', async () => {
+test('10. fills at different leverages: exact collateral from the recorded margin; older rows and manual leveraged rows refused', async () => {
   const id = newAccount()
   await open(id, 'BTC', 'LONG', 300, 3) // margin 100
-  await open(id, 'BTC', 'LONG', 300, 2) // margin 150 -> booked 250, row leverage trunc(2.5) = 2
-  assert.equal(rows(id)[0]!.leverage, 2)
-  const r = adapt(id, { BTC: 100 })
-  assert.equal(r.status, 'not_evaluable')
-  if (r.status === 'not_evaluable') assert.match(r.anomalies[0]!, /rows give 300 above 1x, account marginUsed is 250/)
+  await open(id, 'BTC', 'LONG', 300, 2) // margin 150 -> 250 posted
+  assert.equal(rows(id)[0]!.margin, 250)
+  const r = ready(adapt(id, { BTC: 100 }))
+  near(r.collateral.perpMargin, 250, 'posted margin')
+  near(r.collateral.total, 1000 - 0.0007 * 600, 'collateral = capital - fees')
+  cachePrice('BTC', 'CRYPTO', 100)
+  near(r.state.accountValue, (await calcAccountEquity(account(id))).equity, 'account value = original equity', 1e-9)
+
+  // the same row as written before 006G-4: no margin, leverage truncated to 2
+  rawDb.prepare('UPDATE positions SET margin = NULL, leverage = 2 WHERE account_id = ?').run(id)
+  const old = adapt(id, { BTC: 100 })
+  assert.equal(old.status, 'not_evaluable')
+  if (old.status === 'not_evaluable') assert.match(old.anomalies[0]!, /rows give 300 above 1x, account marginUsed is 250/)
 
   const m = newAccount()
   rawDb.prepare("INSERT INTO positions (version, account_id, symbol, name, market, quantity, available_quantity, avg_cost, leverage, side, accumulated_interest) VALUES ('v1', ?, 'BTC', 'BTC', 'CRYPTO', 3, 3, 100, 3, NULL, 0)").run(m)
@@ -310,7 +318,7 @@ test('15. a position open under the original monitor that the new model would li
 
 test('the adapter is pure: inputs untouched, no database or network access needed', () => {
   const accountRow = Object.freeze({ currentCash: 500, marginUsed: 166.66666666666666 })
-  const positionRows = Object.freeze([Object.freeze({ symbol: 'BTC', market: 'CRYPTO', quantity: 5, avgCost: 100, leverage: 3, side: 'SHORT' })])
+  const positionRows = Object.freeze([Object.freeze({ symbol: 'BTC', market: 'CRYPTO', quantity: 5, avgCost: 100, leverage: 3, side: 'SHORT', margin: 166.66666666666666 })])
   const marks = quotes({ BTC: 100 })
   const copy = structuredClone({ accountRow, positionRows, marks })
   const r = ready(crossInputFromAccount({ account: accountRow, positions: positionRows as any, marks, tables: TABLES, now: NOW }))

@@ -102,6 +102,11 @@ export const positions = sqliteTable(
     avgCost: real('avg_cost').notNull().default(0),
     /** Weighted-average leverage across the fills that built this position. */
     leverage: integer('leverage').notNull().default(1),
+    /**
+     * Margin actually posted for the open quantity (USDC). NULL for spot rows
+     * and for rows written before it existed (see positionMargin).
+     */
+    margin: real('margin'),
     /** 'LONG' | 'SHORT' for leveraged positions. */
     side: text('side'),
     accumulatedInterest: real('accumulated_interest').notNull().default(0),

@@ -4,9 +4,10 @@
  * margin tables are inputs; no database, no network. Not used by the bot.
  *
  * Collateral reconciliation. The perpetual engine takes each position's
- * margin (quantity * avgCost / leverage) out of cash at open and gives it
- * back at close, so the USDC backing the perpetuals is
- *   collateral = cash + sum over perpetual rows of quantity * avgCost / leverage
+ * margin out of cash at open and gives it back at close, so the USDC backing
+ * the perpetuals is
+ *   collateral = cash + sum over perpetual rows of positionMargin(row)
+ * (the margin recorded by the engine; rebuilt from the leverage for older rows)
  * and Hyperliquid's account value = collateral + unrealized P&L at mark.
  * With no spot rows this equals calcAccountEquity at the same prices.
  * Spot rows (side null, from orderMatching) are left out: they are coins the
@@ -14,6 +15,7 @@
  * how a Hyperliquid perp account would hold them, reported with the result.
  */
 import type { Account, Position } from '../db/schema.js'
+import { positionMargin } from './assetCalculator.js'
 import { crossState, type CrossInput, type CrossPosition, type CrossState } from './hyperliquidMargin.js'
 import {
   prepareCrossInput,
@@ -23,7 +25,7 @@ import {
 } from './hyperliquidMarginData.js'
 
 export type AccountRow = Pick<Account, 'currentCash' | 'marginUsed'>
-export type PositionRow = Pick<Position, 'symbol' | 'market' | 'quantity' | 'avgCost' | 'leverage' | 'side'>
+export type PositionRow = Pick<Position, 'symbol' | 'market' | 'quantity' | 'avgCost' | 'leverage' | 'side' | 'margin'>
 
 export interface SpotHolding {
   symbol: string
@@ -83,6 +85,7 @@ export function crossInputFromAccount(params: {
   const perps: CrossPosition[] = []
   let perpMargin = 0
   let leveragedMargin = 0
+  const legacy: string[] = []
 
   if (!Number.isFinite(account.currentCash)) anomalies.push('cash is not a number')
   if (!Number.isFinite(account.marginUsed)) anomalies.push('marginUsed is not a number')
@@ -114,21 +117,25 @@ export function crossInputFromAccount(params: {
       continue
     }
     const leverage = p.leverage > 1 ? p.leverage : 1
-    const margin = (p.quantity * p.avgCost) / leverage
+    const margin = positionMargin(p)
+    if (p.margin === null) legacy.push(p.symbol)
     perpMargin += margin
     if (leverage > 1) leveragedMargin += margin
     perps.push({ coin: p.symbol, side: p.side, size: p.quantity, entryPrice: p.avgCost, leverage })
   }
 
   // The engine books margin only above 1x. If the rows do not rebuild it
-  // (fills at different leverages are merged into one truncated leverage), the
-  // collateral is unknown.
+  // (older rows whose fills used different leverages), the collateral is
+  // unknown.
   if (Math.abs(leveragedMargin - account.marginUsed) > MARGIN_TOLERANCE * Math.max(1, account.marginUsed)) {
     anomalies.push(
-      `margin not reconstructable: rows give ${leveragedMargin} above 1x, account marginUsed is ${account.marginUsed} (e.g. fills merged at different leverages)`,
+      `margin not reconstructable: rows give ${leveragedMargin} above 1x, account marginUsed is ${account.marginUsed} (e.g. an older row built from fills at different leverages)`,
     )
   }
 
+  if (legacy.length > 0) {
+    notes.push(`margin not recorded for ${legacy.join(', ')} (rows written before 006G-4): rebuilt as quantity * avgCost / leverage and accepted only because it matches marginUsed`)
+  }
   if (spotExcluded.length > 0) {
     notes.push(
       `spot holdings excluded from collateral (${spotExcluded.map((s) => s.symbol).join(', ')}): assumed separate from the perp account; the original monitor counts them in equity`,

@@ -18,6 +18,7 @@ import {
   type Order,
   type Position,
 } from '../db/schema.js'
+import { positionMargin } from './assetCalculator.js'
 import { getLastPrice } from './marketData.js'
 import { dbDateMs, utcNow } from '../utils/datetime.js'
 
@@ -42,10 +43,13 @@ export function calculatePositionInterest(position: Position): number {
   const hoursElapsed =
     (Date.now() - dbDateMs(position.lastInterestTime)) / 3_600_000
 
-  // Interest only applies to the borrowed (leveraged) portion.
-  const borrowedNotional =
-    (position.quantity * position.avgCost * (position.leverage - 1)) /
-    position.leverage
+  // Interest only applies to the borrowed (leveraged) portion: the entry
+  // notional not covered by posted margin. With a single leverage this is
+  // quantity * avgCost * (leverage - 1) / leverage.
+  const borrowedNotional = Math.max(
+    position.quantity * position.avgCost - positionMargin(position),
+    0,
+  )
 
   return borrowedNotional * CRYPTO_INTEREST_RATE_HOURLY * hoursElapsed
 }
@@ -153,11 +157,8 @@ export async function placeAndExecuteCrypto(params: {
 
       currentCash -= totalCost
 
-      // Only track margin for leveraged positions
-      if (leverage > 1) marginUsed += initialMargin
-
-      if (pos && pos.leverage > 1 && pos.side) {
-        // Existing leveraged position — settle interest before modifying
+      if (pos && pos.side && pos.quantity > 0) {
+        // Existing perpetual position (any leverage) — settle interest before modifying
         interestCharged = calculatePositionInterest(pos)
         if (interestCharged > 0) {
           if (currentCash < interestCharged) {
@@ -174,21 +175,30 @@ export async function placeAndExecuteCrypto(params: {
           )
         }
 
-        // Adding to existing position — weighted averages
+        // Adding to existing position — weighted average cost, and the margin
+        // actually posted is summed rather than rebuilt from an average leverage
         const oldNotional = pos.quantity * pos.avgCost
         const newQty = pos.quantity + quantity
         const newCost = (oldNotional + notional) / newQty
+        const oldMargin = positionMargin(pos)
+        const newMargin = oldMargin + initialMargin
+        // Effective leverage rounded up, so a position with any borrowed part
+        // stays above 1x (monitor, interest and the perpetual close path)
+        const newLeverage = Math.max(1, Math.ceil((oldNotional + notional) / newMargin - 1e-9))
+
+        // marginUsed covers the margin of positions above 1x
+        if (pos.leverage > 1) marginUsed -= oldMargin
+        if (newLeverage > 1) marginUsed += newMargin
 
         pos = tx
           .update(positions)
           .set({
             accumulatedInterest: pos.accumulatedInterest + interestCharged,
             quantity: newQty,
+            availableQuantity: newQty,
             avgCost: newCost,
-            leverage: Math.trunc(
-              (oldNotional * pos.leverage + notional * leverage) /
-                (oldNotional + notional),
-            ),
+            leverage: newLeverage,
+            margin: newMargin,
             lastInterestTime: utcNow(),
             updateTime: utcNow(),
           })
@@ -196,6 +206,9 @@ export async function placeAndExecuteCrypto(params: {
           .returning()
           .get()
       } else {
+        // Only track margin for leveraged positions
+        if (leverage > 1) marginUsed += initialMargin
+
         // Create new position or convert spot to leveraged
         if (!pos) {
           pos = tx
@@ -223,6 +236,7 @@ export async function placeAndExecuteCrypto(params: {
             availableQuantity: quantity,
             avgCost: execPrice,
             leverage,
+            margin: initialMargin,
             side,
             lastInterestTime: utcNow(),
             updateTime: utcNow(),
@@ -271,21 +285,23 @@ export async function placeAndExecuteCrypto(params: {
             ? exitNotional - entryNotional
             : entryNotional - exitNotional
 
-        // Release margin proportionally
-        const marginReleased = entryNotional / pos.leverage
+        // Release the posted margin in proportion to the quantity closed
+        const newQty = roundQuantity(pos.quantity - quantity)
+        const posted = positionMargin(pos)
+        const marginReleased = newQty === 0 ? posted : (posted * quantity) / pos.quantity
 
         // Net cash change = PnL + margin released - closing fee
         currentCash += pnl + marginReleased - takerFee
         // Opening adds to marginUsed only above 1x
         if (pos.leverage > 1) marginUsed -= marginReleased
 
-        const newQty = roundQuantity(pos.quantity - quantity)
         pos = tx
           .update(positions)
           .set({
             accumulatedInterest: pos.accumulatedInterest + interestCharged,
             quantity: newQty,
             availableQuantity: roundQuantity(pos.availableQuantity - quantity),
+            margin: newQty === 0 ? null : posted - marginReleased,
             ...(newQty === 0
               ? { side: null, leverage: 1, lastInterestTime: null }
               : { lastInterestTime: utcNow() }),
@@ -307,12 +323,19 @@ export async function placeAndExecuteCrypto(params: {
 
         currentCash += notional - takerFee
 
+        const newQty = roundQuantity(pos.quantity - quantity)
         pos = tx
           .update(positions)
           .set({
             accumulatedInterest: pos.accumulatedInterest + interestCharged,
-            quantity: roundQuantity(pos.quantity - quantity),
+            quantity: newQty,
             availableQuantity: roundQuantity(pos.availableQuantity - quantity),
+            // a 1x long of the engine keeps its margin (= entry notional)
+            // in step with the quantity; spot rows have none
+            margin:
+              pos.margin === null || newQty === 0
+                ? null
+                : (pos.margin * newQty) / pos.quantity,
             updateTime: utcNow(),
           })
           .where(eq(positions.id, pos.id))

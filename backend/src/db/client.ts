@@ -233,4 +233,11 @@ CREATE TABLE IF NOT EXISTS ai_decision_logs (
 CREATE INDEX IF NOT EXISTS ix_ai_decision_logs_id ON ai_decision_logs (id);
 CREATE INDEX IF NOT EXISTS ix_ai_decision_logs_decision_time ON ai_decision_logs (decision_time);
 `)
+
+  // Posted margin per position, added after the original schema: databases
+  // created before it get the nullable column, existing rows keep NULL.
+  const positionColumns = sqlite.prepare('PRAGMA table_info(positions)').all() as { name: string }[]
+  if (!positionColumns.some((c) => c.name === 'margin')) {
+    sqlite.exec('ALTER TABLE positions ADD COLUMN margin REAL')
+  }
 }
