@@ -9,7 +9,8 @@ import { fileURLToPath } from 'node:url'
 
 const LINE = /^\d{4}-\d\d-\d\dT/
 const SCHEDULER_RESET = /services\.scheduler: Auto trading job reset successfully - interval: 300s/
-const KEY_PATTERN = /AIza[0-9A-Za-z_-]{20,}|Bearer (?!\[REDACTED\])[A-Za-z0-9._-]{8,}|sk-[A-Za-z0-9_-]{16,}/
+// \b prima di sk-: testo delle notizie come "risk-on-risk-off-..." non deve sembrare una chiave
+const KEY_PATTERN = /\bAIza[0-9A-Za-z_-]{20,}|Bearer (?!\[REDACTED\])[A-Za-z0-9._-]{8,}|\bsk-[A-Za-z0-9_-]{16,}/
 
 export function evaluateRun({ logText, traceText = '', maxAttempts = 12, expectCycles = 12 }) {
   const lines = logText.split(/\r?\n/).filter((l) => LINE.test(l))

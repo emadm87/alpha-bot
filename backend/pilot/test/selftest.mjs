@@ -31,7 +31,7 @@ const sha = (f) => crypto.createHash('sha256').update(fs.readFileSync(f)).digest
 const node = (argv, env = {}) => spawnSync(process.execPath, argv, { cwd: backendDir, env: { ...process.env, ...env }, encoding: 'utf8' })
 
 await step('sintassi degli script', () => {
-  for (const f of ['check-run.mjs', 'report.mjs', 'ccxt-proxy.mjs', 'run-pilot.mjs', 'test/fake-backend.mjs', 'test/selftest.mjs']) {
+  for (const f of ['check-run.mjs', 'report.mjs', 'ccxt-proxy.mjs', 'run-pilot.mjs', 'ai-budget.mjs', 'test/fake-backend.mjs', 'test/selftest.mjs']) {
     const r = node(['--check', path.join(pilotDir, f)])
     assert.equal(r.status, 0, `${f}: ${r.stderr}`)
   }
@@ -118,6 +118,74 @@ await step('check-run: log corretto (12 cicli) e log con errori', () => {
   assert.ok(leak.stop.includes('possibile chiave nella traccia'))
 })
 
+const budget = pathToFileURL(path.join(pilotDir, 'ai-budget.mjs')).href
+const readJsonl = (f) => (fs.existsSync(f) ? fs.readFileSync(f, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [])
+
+await step('ai-budget: 300 tentativi inviati, oltre bloccati senza rete; 200/429/401/403/404/timeout classificati; chiave non registrata', () => {
+  const file = path.join(tmp, 'budget-300.jsonl')
+  const code = `
+    import http from 'node:http'
+    const statuses = [200, 429, 401, 403, 404]
+    let n = 0
+    const srv = http.createServer((q, r) => { const s = statuses[n++ % statuses.length]; if (q.url === '/hang') return; r.writeHead(s); r.end('{}') }).listen(0, '127.0.0.1')
+    await new Promise((r) => srv.once('listening', r))
+    const base = 'http://127.0.0.1:' + srv.address().port
+    let sent = 0, blocked = 0, timeouts = 0
+    try { await fetch(base + '/hang', { signal: AbortSignal.timeout(200) }) } catch (e) { timeouts++ }
+    for (let i = 0; i < 304; i++) {
+      try { await fetch(base + '/v1beta/openai/chat/completions', { method: 'POST', headers: { Authorization: 'Bea' + 'rer ' + 'test-secret-value' + '-123456' } }); sent++ }
+      catch (e) { if (/budget exhausted/.test(e.message)) blocked++ }
+    }
+    srv.closeAllConnections(); srv.close()
+    console.log(JSON.stringify({ sent, blocked, timeouts }))`
+  const r = spawnSync(process.execPath, ['--import', budget, '--input-type=module', '-e', code], {
+    encoding: 'utf8', env: { ...process.env, AI_BUDGET_HOST: '127.0.0.1', AI_BUDGET_MAX: '300', AI_BUDGET_FILE: file },
+  })
+  assert.equal(r.status, 0, r.stderr)
+  assert.deepEqual(JSON.parse(r.stdout.trim()), { sent: 299, blocked: 5, timeouts: 1 })
+  const rows = readJsonl(file)
+  assert.equal(rows.filter((x) => x.result === 'sent').length, 300)
+  assert.equal(rows.filter((x) => x.result.startsWith('blocked')).length, 5)
+  assert.equal(Math.max(...rows.map((x) => x.attempt ?? 0)), 300)
+  const classes = new Set(rows.map((x) => x.class).filter(Boolean))
+  for (const c of ['ok', 'rate_limited', 'auth', 'not_found', 'timeout']) assert.ok(classes.has(c), c)
+  assert.ok(!fs.readFileSync(file, 'utf8').includes('test-secret-value'), 'chiave nel registro')
+})
+
+await step('ai-budget: i retry 429 del client originale consumano il budget (3 per ciclo)', () => {
+  const file = path.join(tmp, 'budget-client.jsonl')
+  const r = spawnSync(process.execPath, [tsx, 'pilot/test/budget-client.mts', '2'], {
+    cwd: backendDir, encoding: 'utf8',
+    env: { ...process.env, AI_BUDGET_HOST: '127.0.0.1', AI_BUDGET_MAX: '4', AI_BUDGET_FILE: file, NODE_OPTIONS: `--import ${budget}`, LOG_LEVEL: 'error' },
+  })
+  assert.equal(r.status, 0, r.stderr.slice(-400))
+  const rows = readJsonl(file)
+  assert.equal(rows.filter((x) => x.result === 'sent').length, 4, 'ciclo 1: 3 tentativi, ciclo 2: 1 tentativo')
+  assert.equal(rows.filter((x) => x.class === 'rate_limited').length, 4)
+  assert.equal(rows.filter((x) => x.result.startsWith('blocked')).length, 2, 'ciclo 2: 2 tentativi bloccati')
+  assert.deepEqual(JSON.parse(r.stdout.trim().split('\n').at(-1)).decisions, [null, null])
+})
+
+await step('check-run: retry AI distinti dai cicli, errori Hyperliquid non contati come tentativi AI, nessun falso allarme dalle notizie', () => {
+  const extra = [
+    '2026-10-25T11:00:01.000Z WARNING services.aiDecision: AI API rate limited (attempt 1/3), waiting 1.4s...',
+    '2026-10-25T11:00:02.000Z ERROR   services.hyperliquid: Error fetching prices for BTC: RateLimitExceeded: hyperliquid POST https://api.hyperliquid.xyz/info 429 Too Many Requests null',
+    '2026-10-25T11:00:02.100Z WARNING services.assetCalculator: Cannot get price for BTC.CRYPTO, counting margin without unrealized P&L: x',
+  ]
+  const trace = ['2026-10-25T10:05:00.000Z', '2026-10-25T10:10:00.000Z']
+    .map((ts) => JSON.stringify({ ts, event: 'request', model: 'm', payload: { c: 'markets turn risk-on-risk-off-sentiment-shift-again today' } })).join('\n')
+  const r = evaluateRun({ logText: logOf(2, extra), traceText: trace, maxAttempts: 12, expectCycles: 2 })
+  assert.equal(r.trace.requests, 2)
+  assert.equal(r.trace.http_attempts_estimate, 3, 'richieste + 1 retry AI; il 429 Hyperliquid non conta')
+  assert.deepEqual(r.stop, [])
+  const warn = (name) => r.checks.find((c) => c.name === name)
+  assert.equal(warn('nessun tentativo ripetuto (ogni ripetizione puo essere fatturata)').severity, 'warn')
+  assert.equal(warn('errori prezzo').severity, 'warn')
+  assert.equal(warn('equity senza PnL per prezzo mancante').severity, 'warn')
+  const over = evaluateRun({ logText: logOf(2, extra), traceText: trace, maxAttempts: 2 })
+  assert.ok(over.stop.some((s) => s.startsWith('limite tentativi superato: 3/2')))
+})
+
 const runPilot = (dir, scenario, extra = []) =>
   node([path.join(pilotDir, 'run-pilot.mjs'), '--run-dir', dir, ...extra], { FAKE_SCENARIO: scenario })
 
@@ -157,6 +225,22 @@ await step('launcher: errore 403 -> arresto immediato', () => {
   assert.ok(trace.length <= 2, `${trace.length} richieste prima dell'arresto`)
 })
 
+await step('launcher: interruzione (SIGINT) arresta l app e salva lo stato', async () => {
+  const dir = path.join(tmp, 'interrupt')
+  const { spawn } = await import('node:child_process')
+  const p = spawn(process.execPath, [path.join(pilotDir, 'run-pilot.mjs'), '--run-dir', dir, ...fakeArgs(5795)], {
+    cwd: backendDir, env: { ...process.env, FAKE_SCENARIO: 'complete', FAKE_CYCLES: '1' },
+  })
+  const meta = path.join(dir, 'run-meta.json')
+  for (let i = 0; i < 100 && !(fs.existsSync(meta) && JSON.parse(fs.readFileSync(meta, 'utf8')).account_id); i++) await new Promise((r) => setTimeout(r, 100))
+  p.kill('SIGINT')
+  const code = await new Promise((r) => p.on('exit', r))
+  assert.equal(code, 2)
+  const m = JSON.parse(fs.readFileSync(meta, 'utf8'))
+  assert.equal(m.status, 'interrupted')
+  assert.ok(m.exit, 'app arrestata')
+})
+
 await step('launcher: cartella non vuota rifiutata', () => {
   const dir = path.join(tmp, 'complete') // gia usata
   assert.equal(runPilot(dir, 'complete', fakeArgs(5794)).status, 65)
@@ -164,7 +248,7 @@ await step('launcher: cartella non vuota rifiutata', () => {
 
 await step('nessuna chiave o credenziale nei file del pilota', () => {
   // costruito a pezzi, cosi questo file non corrisponde a se stesso
-  const pattern = new RegExp(['AI' + 'za[0-9A-Za-z_-]{20,}', 's' + 'k-[A-Za-z0-9_-]{16,}', 'Bea' + 'rer [A-Za-z0-9._-]{16,}', '-'.repeat(5) + 'BEGIN'].join('|'))
+  const pattern = new RegExp(['\\bAI' + 'za[0-9A-Za-z_-]{20,}', '\\bs' + 'k-[A-Za-z0-9_-]{16,}', 'Bea' + 'rer [A-Za-z0-9._-]{16,}', '-'.repeat(5) + 'BEGIN'].join('|'))
   const walk = (d) => fs.readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(path.join(d, e.name)) : [path.join(d, e.name)]))
   for (const f of walk(pilotDir)) assert.ok(!pattern.test(fs.readFileSync(f, 'utf8')), f)
 })
