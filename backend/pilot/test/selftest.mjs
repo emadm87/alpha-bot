@@ -5,6 +5,7 @@ import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import crypto from 'node:crypto'
 import fs from 'node:fs'
+import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -15,7 +16,14 @@ import { buildReport } from '../report.mjs'
 const here = path.dirname(fileURLToPath(import.meta.url))
 const pilotDir = path.resolve(here, '..')
 const backendDir = path.resolve(pilotDir, '..')
-const tsx = path.join(backendDir, 'node_modules', 'tsx', 'dist', 'cli.mjs')
+// un solo processo Node con il loader tsx, come il launcher (niente processo figlio della CLI tsx)
+const tsx = ['--import', 'tsx']
+const isWindows = process.platform === 'win32'
+const portFree = (port) => new Promise((resolve) => {
+  const s = net.connect({ port, host: '127.0.0.1' })
+  s.once('connect', () => (s.destroy(), resolve(false)))
+  s.once('error', () => resolve(true))
+})
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-pilot-selftest-'))
 const results = []
 const near = (a, b, what, eps = 1e-3) => assert.ok(Math.abs(a - b) <= eps, `${what}: ${a} vs ${b}`)
@@ -52,7 +60,7 @@ await step('shim ccxt: httpsProxy solo con HTTPS_PROXY, nessuna credenziale (sen
 
 const dbFile = path.join(tmp, 'synthetic.db')
 await step('database sintetico dal motore reale (nessuna rete)', () => {
-  const r = node([tsx, 'pilot/test/build-synthetic.mts', dbFile], { LOG_LEVEL: 'error' })
+  const r = node([...tsx, 'pilot/test/build-synthetic.mts', dbFile], { LOG_LEVEL: 'error' })
   assert.equal(r.status, 0, r.stderr.slice(-500))
 })
 
@@ -154,7 +162,7 @@ await step('ai-budget: 300 tentativi inviati, oltre bloccati senza rete; 200/429
 
 await step('ai-budget: i retry 429 del client originale consumano il budget (3 per ciclo)', () => {
   const file = path.join(tmp, 'budget-client.jsonl')
-  const r = spawnSync(process.execPath, [tsx, 'pilot/test/budget-client.mts', '2'], {
+  const r = spawnSync(process.execPath, [...tsx, 'pilot/test/budget-client.mts', '2'], {
     cwd: backendDir, encoding: 'utf8',
     env: { ...process.env, AI_BUDGET_HOST: '127.0.0.1', AI_BUDGET_MAX: '4', AI_BUDGET_FILE: file, NODE_OPTIONS: `--import ${budget}`, LOG_LEVEL: 'error' },
   })
@@ -197,13 +205,16 @@ await step('launcher: senza --authorized non avvia nulla', () => {
 })
 
 const fakeArgs = (port) => ['--authorized', '--test-backend', path.join(here, 'fake-backend.mjs'), '--poll-ms', '300', '--port', String(port), '--proxy-shim', 'off', '--startup-ms', '10000']
-await step('launcher: pilota completo (12 cicli) e arresto', () => {
+await step('launcher: pilota completo (12 cicli) e arresto', async () => {
   const dir = path.join(tmp, 'complete')
   const r = runPilot(dir, 'complete', fakeArgs(5791))
   assert.equal(r.status, 0, r.stdout + r.stderr)
   const meta = JSON.parse(fs.readFileSync(path.join(dir, 'run-meta.json'), 'utf8'))
   assert.equal(meta.status, 'complete')
-  assert.match(fs.readFileSync(path.join(dir, 'backend.log'), 'utf8'), /Received SIGTERM/)
+  assert.ok(meta.exit, 'app arrestata')
+  // Windows non ha SIGTERM: l'app viene terminata con taskkill e non scrive la riga di chiusura
+  if (!isWindows) assert.match(fs.readFileSync(path.join(dir, 'backend.log'), 'utf8'), /Received SIGTERM/)
+  assert.ok(await portFree(5791), 'porta ancora occupata: processo dell app rimasto attivo')
 })
 
 await step('launcher: errore di avvio -> nessun conto creato, nessuna chiamata', () => {
@@ -225,20 +236,50 @@ await step('launcher: errore 403 -> arresto immediato', () => {
   assert.ok(trace.length <= 2, `${trace.length} richieste prima dell'arresto`)
 })
 
-await step('launcher: interruzione (SIGINT) arresta l app e salva lo stato', async () => {
-  const dir = path.join(tmp, 'interrupt')
+async function startFake(dir, port, extraEnv = {}, extraArgs = []) {
   const { spawn } = await import('node:child_process')
-  const p = spawn(process.execPath, [path.join(pilotDir, 'run-pilot.mjs'), '--run-dir', dir, ...fakeArgs(5795)], {
-    cwd: backendDir, env: { ...process.env, FAKE_SCENARIO: 'complete', FAKE_CYCLES: '1' },
+  const p = spawn(process.execPath, [path.join(pilotDir, 'run-pilot.mjs'), '--run-dir', dir, ...fakeArgs(port), ...extraArgs], {
+    cwd: backendDir, env: { ...process.env, FAKE_SCENARIO: 'complete', FAKE_CYCLES: '1', ...extraEnv },
   })
+  const exit = new Promise((r) => p.on('exit', (code) => r(code)))
   const meta = path.join(dir, 'run-meta.json')
   for (let i = 0; i < 100 && !(fs.existsSync(meta) && JSON.parse(fs.readFileSync(meta, 'utf8')).account_id); i++) await new Promise((r) => setTimeout(r, 100))
-  p.kill('SIGINT')
-  const code = await new Promise((r) => p.on('exit', r))
-  assert.equal(code, 2)
+  return { p, exit, meta }
+}
+
+// Su Windows un segnale inviato da un altro processo termina il launcher senza eseguire gli handler:
+// lo stop da programma si fa con il file STOP; Ctrl+C dalla console resta gestito (non simulabile qui).
+if (!isWindows) {
+  await step('launcher: interruzione (SIGINT) arresta l app e salva lo stato', async () => {
+    const { p, exit, meta } = await startFake(path.join(tmp, 'interrupt'), 5795)
+    p.kill('SIGINT')
+    assert.equal(await exit, 2)
+    const m = JSON.parse(fs.readFileSync(meta, 'utf8'))
+    assert.equal(m.status, 'interrupted')
+    assert.ok(m.exit, 'app arrestata')
+    assert.ok(await portFree(5795), 'porta ancora occupata')
+  })
+}
+
+await step('launcher: file STOP (tutti i sistemi) arresta, salva stato e report, rimuove la chiave', async () => {
+  const dir = path.join(tmp, 'stop-file')
+  const fakeKey = 'fake-' + 'k'.repeat(24)
+  const { exit, meta } = await startFake(dir, 5796, { FAKE_TEST_KEY: fakeKey }, ['--key-mode', 'env', '--key-env', 'FAKE_TEST_KEY'])
+  fs.writeFileSync(path.join(dir, 'STOP'), '')
+  assert.equal(await exit, 2)
   const m = JSON.parse(fs.readFileSync(meta, 'utf8'))
   assert.equal(m.status, 'interrupted')
+  assert.deepEqual(m.reasons.slice(0, 1), ['file STOP'])
   assert.ok(m.exit, 'app arrestata')
+  assert.equal(m.key_scrubbed, true)
+  assert.ok(fs.existsSync(path.join(dir, 'check.json')))
+  assert.ok(await portFree(5796), 'porta ancora occupata')
+  const Database = createRequire(path.join(backendDir, 'package.json'))('better-sqlite3')
+  const db = new Database(path.join(dir, 'pilot.db'), { readonly: true })
+  const keys = db.prepare('SELECT api_key FROM accounts').all().map((r) => r.api_key)
+  db.close()
+  assert.deepEqual(keys, ['redacted-after-run'])
+  for (const f of fs.readdirSync(dir)) assert.ok(!fs.readFileSync(path.join(dir, f)).includes(fakeKey), `chiave in ${f}`)
 })
 
 await step('launcher: cartella non vuota rifiutata', () => {
@@ -253,7 +294,7 @@ await step('nessuna chiave o credenziale nei file del pilota', () => {
   for (const f of walk(pilotDir)) assert.ok(!pattern.test(fs.readFileSync(f, 'utf8')), f)
 })
 
-fs.rmSync(tmp, { recursive: true, force: true })
+fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
 console.log(results.join('\n'))
 const failed = results.filter((r) => r.startsWith('FAIL')).length
 console.log(`\n${results.length - failed}/${results.length} verifiche superate`)

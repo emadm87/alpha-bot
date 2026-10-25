@@ -17,9 +17,13 @@
 //   --proxy-shim auto | on | off       (auto: carica ccxt-proxy.mjs se HTTPS_PROXY e impostata)
 //   --price-in / --price-out           USD per 1M token, solo per il costo nel report
 //
+// Arresto pulito su qualunque sistema: creare il file STOP nella cartella della prova
+// (es. `type nul > <run-dir>\STOP` su Windows, `touch <run-dir>/STOP` altrove) oppure Ctrl+C nel
+// terminale del launcher. Entrambi fermano l'app, salvano stato e report e cancellano la chiave.
+//
 // Non modifica codice, prompt, strategie, sizing, monitor o liquidazioni: avvia l'app originale
 // (src/index.ts) con un database nuovo, crea UN conto da 1.000 USDC e sorveglia log e traccia.
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import net from 'node:net'
 import path from 'node:path'
@@ -55,6 +59,7 @@ const cfg = {
 }
 const PLACEHOLDER_KEY = 'network-secret-placeholder'
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+const isWindows = process.platform === 'win32'
 const now = () => new Date().toISOString()
 
 function fail(code, message) {
@@ -72,6 +77,7 @@ const files = {
   meta: path.join(runDir, 'run-meta.json'),
   check: path.join(runDir, 'check.json'),
   report: path.join(runDir, 'report.json'),
+  stop: path.join(runDir, 'STOP'),
 }
 const useShim =
   cfg.proxyShim === 'on' || (cfg.proxyShim === 'auto' && Boolean(process.env.HTTPS_PROXY || process.env.https_proxy))
@@ -115,9 +121,11 @@ if (useShim) {
   env.NODE_USE_ENV_PROXY = '1'
   env.NODE_OPTIONS = `${env.NODE_OPTIONS ?? ''} --import ${pathToFileURL(path.join(here, 'ccxt-proxy.mjs')).href}`.trim()
 }
+// L'app gira in UN solo processo Node (loader tsx caricato con --import): la CLI di tsx avvierebbe
+// un secondo processo che su Windows resterebbe orfano quando il primo viene terminato.
 const command = cfg.testBackend
   ? [path.resolve(cfg.testBackend)]
-  : [path.join(backendDir, 'node_modules', 'tsx', 'dist', 'cli.mjs'), 'src/index.ts']
+  : ['--import', 'tsx', 'src/index.ts']
 const logStream = fs.createWriteStream(files.log, { flags: 'a' })
 const child = spawn(process.execPath, command, { cwd: backendDir, env, stdio: ['ignore', 'pipe', 'pipe'] })
 child.stdout.pipe(logStream)
@@ -136,19 +144,38 @@ async function stopApp(status, reasons) {
   meta.status = status
   meta.reasons = reasons
   if (!exited) {
-    // SIGTERM: l'app ferma lo scheduler e chiude il server (src/index.ts). Su Windows il
-    // segnale termina il processo subito; le scritture SQLite sono transazioni atomiche.
-    child.kill('SIGTERM')
+    if (isWindows) {
+      // Windows non ha SIGTERM: child.kill termina il processo senza eseguirne gli handler.
+      // taskkill /T chiude anche eventuali sotto-processi; le scritture SQLite sono transazioni
+      // atomiche e i dati restano nel file WAL, letto dal report.
+      spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' })
+    } else {
+      // SIGTERM: l'app ferma lo scheduler e chiude il server (src/index.ts)
+      child.kill('SIGTERM')
+      for (let i = 0; i < 40 && !exited; i++) await sleep(250)
+      if (!exited) child.kill('SIGKILL')
+    }
     for (let i = 0; i < 40 && !exited; i++) await sleep(250)
-    if (!exited) child.kill('SIGKILL')
-    for (let i = 0; i < 20 && !exited; i++) await sleep(250)
   }
   meta.stopped_at = now()
   meta.exit = exited
   saveMeta()
 }
 
-async function finish(status, reasons) {
+// Un solo arresto anche se Ctrl+C, file STOP e sorveglianza scattano insieme
+let finishing = null
+const finish = (status, reasons) => (finishing ??= doFinish(status, reasons))
+const stopRequested = () => fs.existsSync(files.stop)
+// Attesa interrompibile dal file STOP (controllato ogni 500 ms)
+async function wait(ms) {
+  const end = Date.now() + ms
+  while (Date.now() < end) {
+    if (stopRequested()) await finish('interrupted', ['file STOP'])
+    await sleep(Math.min(500, end - Date.now()))
+  }
+}
+
+async function doFinish(status, reasons) {
   await stopApp(status, reasons)
   await new Promise((r) => logStream.end(r))
   const check = evaluate()
@@ -157,9 +184,24 @@ async function finish(status, reasons) {
     // la chiave reale non deve restare nel database della prova
     const { createRequire } = await import('node:module')
     const Database = createRequire(path.join(backendDir, 'package.json'))('better-sqlite3')
-    const db = new Database(files.db)
-    db.prepare("UPDATE accounts SET api_key='redacted-after-run' WHERE api_key=?").run(apiKey)
-    db.close()
+    // su Windows il file puo restare bloccato per qualche istante dopo la chiusura dell'app: si riprova
+    let scrubbed = false
+    for (let i = 0; i < 20 && !scrubbed; i++) {
+      try {
+        const db = new Database(files.db, { timeout: 5000 })
+        try {
+          db.prepare("UPDATE accounts SET api_key='redacted-after-run' WHERE api_key=?").run(apiKey)
+        } finally {
+          db.close()
+        }
+        scrubbed = true
+      } catch (e) {
+        if (i === 19) meta.reasons.push(`ATTENZIONE: chiave non rimossa dal database (${e?.code ?? e}): cancellare ${files.db}`)
+        else await sleep(500)
+      }
+    }
+    meta.key_scrubbed = scrubbed
+    saveMeta()
   }
   let report = null
   if (meta.account_id && fs.existsSync(files.db)) {
@@ -180,12 +222,15 @@ async function finish(status, reasons) {
   }, null, 2))
   process.exit(meta.status === 'complete' ? 0 : 2)
 }
-for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => void finish('interrupted', [`${sig} ricevuto dal launcher`]))
+// Ctrl+C (SIGINT, emulato anche nella console Windows), SIGTERM, Ctrl+Break (SIGBREAK, solo Windows)
+for (const sig of ['SIGINT', 'SIGTERM', ...(isWindows ? ['SIGBREAK'] : [])]) {
+  process.on(sig, () => void finish('interrupted', [`${sig} ricevuto dal launcher`]))
+}
 
 // --- 1. attesa dell'avvio, PRIMA di creare il conto (nessuna chiamata AI finora) ----------------
 const startDeadline = Date.now() + cfg.startupMs
 while (Date.now() < startDeadline && !exited && !/All services initialized successfully|Service initialization failed/.test(read(files.log))) {
-  await sleep(500)
+  await wait(500)
 }
 const startup = evaluate()
 const startupProblems = [
@@ -218,7 +263,7 @@ const t0 = Date.now()
 
 // --- 3. sorveglianza fino a fine pilota, errore o timeout ------------------------------------------
 for (;;) {
-  await sleep(cfg.pollMs)
+  await wait(cfg.pollMs)
   const r = evaluate()
   const elapsed = Date.now() - t0
   if (exited) await finish('crashed', [`app terminata: ${JSON.stringify(exited)}`])

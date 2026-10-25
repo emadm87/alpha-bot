@@ -1,7 +1,7 @@
 // SOLO TEST, OFFLINE: il client AI originale (callAIForDecision) contro un server locale che risponde 429,
 // con ai-budget.mjs caricato: i retry del client devono consumare il budget. Nessuna rete esterna.
 // Uso: AI_BUDGET_HOST=127.0.0.1 AI_BUDGET_MAX=N AI_BUDGET_FILE=... NODE_OPTIONS=--import <ai-budget> \
-//      node node_modules/tsx/dist/cli.mjs pilot/test/budget-client.mts <cicli>
+//      node --import tsx pilot/test/budget-client.mts <cicli>
 import fs from 'node:fs'
 import http from 'node:http'
 import os from 'node:os'
@@ -31,5 +31,8 @@ const cycles = Number(process.argv[2] ?? 1)
 const decisions = []
 for (let c = 0; c < cycles; c++) decisions.push(await callAIForDecision(account, portfolio, { BTC: 1 }))
 srv.close()
-fs.rmSync(dir, { recursive: true, force: true })
+// il client del database ha aperto t.db: va chiuso prima di cancellarlo (Windows rifiuta con EBUSY)
+const { rawDb } = await import('../../src/db/client.js')
+rawDb.close()
+fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
 console.log(JSON.stringify({ decisions }))

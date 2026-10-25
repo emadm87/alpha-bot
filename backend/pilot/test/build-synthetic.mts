@@ -1,6 +1,6 @@
 // SOLO TEST: database e traccia SINTETICI per validare report.mjs.
 // Motore reale (placeAndExecuteCrypto) con prezzi iniettati nella cache; nessuna rete, nessuna AI.
-// Uso (da backend/): node node_modules/tsx/dist/cli.mjs pilot/test/build-synthetic.mts <out.db>
+// Uso (da backend/): node --import tsx pilot/test/build-synthetic.mts <out.db>
 import fs from 'node:fs'
 const out = process.argv[2]
 if (!out) throw new Error('missing output path')

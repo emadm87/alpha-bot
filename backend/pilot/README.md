@@ -87,6 +87,22 @@ Parametri fissi del pilota: modello `gemini-3.5-flash-lite`, base URL
 mercati BTC ETH SOL BNB XRP DOGE del prompt originale, solo perpetual MARKET.
 Per la prova da 24 h (autorizzazione separata): `--cycles 288 --max-attempts 300 --timeout-min 1460`.
 
+**Limite rigido dei tentativi verso Gemini (`ai-budget.mjs`).** `--max-attempts` è solo un controllo a
+posteriori. Il limite garantito si ottiene caricando il preload, che rifiuta senza inviarla ogni richiesta
+oltre `AI_BUDGET_MAX`, retry compresi (vale per il processo dell'app; il launcher non lo riavvia):
+
+```bash
+AI_BUDGET_MAX=300 AI_BUDGET_FILE="$PWD/pilot/runs/<cartella>/ai-attempts.jsonl" \
+NODE_OPTIONS="--import file://$PWD/pilot/ai-budget.mjs" node pilot/run-pilot.mjs --authorized ...
+```
+```powershell
+$env:AI_BUDGET_MAX = "300"
+$env:AI_BUDGET_FILE = "$PWD\pilot\runs\<cartella>\ai-attempts.jsonl"
+$env:NODE_OPTIONS = "--import " + ([System.Uri](Resolve-Path pilot\ai-budget.mjs).Path).AbsoluteUri
+node pilot/run-pilot.mjs --authorized ...
+```
+Il file viene creato alla prima chiamata, quindi può stare nella cartella della prova. Dopo il ciclo 1 il file `ai-attempts.jsonl` deve esistere: se manca, il preload non è attivo e va fermata la prova.
+
 Il launcher:
 
 1. rifiuta se manca `--authorized`, se la cartella non è vuota, se la porta è occupata o la chiave manca;
@@ -123,9 +139,27 @@ Automatico quando si verifica una di queste condizioni:
 - reset dello scheduler fallito, ordini manuali, nessuna chiamata AI entro 6 minuti dalla creazione del conto;
 - timeout (`--timeout-min`, default 62).
 
-Arresto manuale: `Ctrl+C` nel terminale del launcher, che ferma l'app e genera comunque il report.
-L'app gestisce SIGTERM fermando lo scheduler; su Windows il processo termina subito, e le scritture
-SQLite restano atomiche. Conviene fermare subito dopo un ciclo, non durante una chiamata.
+Arresto manuale, su qualunque sistema:
+
+- **file `STOP`** nella cartella della prova (consigliato, anche da un altro terminale):
+  `type nul > pilot\runs\<cartella>\STOP` su Windows, `touch pilot/runs/<cartella>/STOP` altrove;
+- **`Ctrl+C`** nel terminale del launcher.
+
+Entrambi fermano l'app, salvano `run-meta.json`, `check.json` e `report.json` e, con `--key-mode env`,
+cancellano la chiave dal database. Conviene fermare subito dopo un ciclo, non durante una chiamata.
+
+Dettagli per sistema:
+
+- **Linux/macOS:** il launcher invia SIGTERM; l'app ferma lo scheduler e chiude il server
+  (nel log compare `Received SIGTERM`).
+- **Windows:** non esiste SIGTERM. Il launcher termina l'app con `taskkill /T /F`, quindi la riga
+  `Received SIGTERM` non compare. Le scritture SQLite sono transazioni atomiche e i dati restano nel
+  file `pilot.db-wal`, che va conservato insieme a `pilot.db`. Un `kill` inviato al launcher da un
+  altro processo lo termina senza report: usare il file `STOP`. Se la finestra del launcher viene
+  chiusa, verificare che la porta 5611 sia libera (`netstat -ano | findstr 5611`) e chiudere il
+  processo rimasto (`taskkill /pid <pid> /T /F`).
+- L'app gira in un solo processo Node (`node --import tsx src/index.ts`), così l'arresto non lascia
+  processi orfani.
 
 ## 6. Report economico
 
