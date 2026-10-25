@@ -147,7 +147,8 @@ await step('ai-budget: 300 tentativi inviati, oltre bloccati senza rete; 200/429
     srv.closeAllConnections(); srv.close()
     console.log(JSON.stringify({ sent, blocked, timeouts }))`
   const r = spawnSync(process.execPath, ['--import', budget, '--input-type=module', '-e', code], {
-    encoding: 'utf8', env: { ...process.env, AI_BUDGET_HOST: '127.0.0.1', AI_BUDGET_MAX: '300', AI_BUDGET_FILE: file },
+        // blocco dopo 401/403/404 disattivato qui: si verificano solo limite e classificazione (blocco: test dedicato)
+    encoding: 'utf8', env: { ...process.env, AI_BUDGET_HOST: '127.0.0.1', AI_BUDGET_MAX: '300', AI_BUDGET_FILE: file, AI_BUDGET_STOP_ON: '' },
   })
   assert.equal(r.status, 0, r.stderr)
   assert.deepEqual(JSON.parse(r.stdout.trim()), { sent: 299, blocked: 5, timeouts: 1 })
@@ -172,6 +173,40 @@ await step('ai-budget: i retry 429 del client originale consumano il budget (3 p
   assert.equal(rows.filter((x) => x.class === 'rate_limited').length, 4)
   assert.equal(rows.filter((x) => x.result.startsWith('blocked')).length, 2, 'ciclo 2: 2 tentativi bloccati')
   assert.deepEqual(JSON.parse(r.stdout.trim().split('\n').at(-1)).decisions, [null, null])
+})
+
+await step('ai-budget: dopo 401/403/404 nessuna altra richiesta viene inviata', () => {
+  for (const status of [401, 403, 404]) {
+    const file = path.join(tmp, `budget-stop-${status}.jsonl`)
+    const code = `
+      import http from 'node:http'
+      let hits = 0
+      const srv = http.createServer((q, r) => { hits++; r.writeHead(${status}); r.end('{}') }).listen(0, '127.0.0.1')
+      await new Promise((r) => srv.once('listening', r))
+      const url = 'http://127.0.0.1:' + srv.address().port + '/v1beta/openai/chat/completions'
+      const out = []
+      for (let i = 0; i < 3; i++) { try { out.push((await fetch(url, { method: 'POST' })).status) } catch (e) { out.push(/disabled after HTTP/.test(e.message) ? 'blocked' : e.message) } }
+      srv.closeAllConnections(); srv.close()
+      console.log(JSON.stringify({ hits, out }))`
+    const r = spawnSync(process.execPath, ['--import', budget, '--input-type=module', '-e', code], {
+      encoding: 'utf8', env: { ...process.env, AI_BUDGET_HOST: '127.0.0.1', AI_BUDGET_MAX: '300', AI_BUDGET_FILE: file },
+    })
+    assert.equal(r.status, 0, r.stderr)
+    assert.deepEqual(JSON.parse(r.stdout.trim()), { hits: 1, out: [status, 'blocked', 'blocked'] }, String(status))
+    assert.equal(readJsonl(file).filter((x) => x.result === 'blocked_after_error').length, 2)
+  }
+  // 429 non blocca: i retry del client restano possibili entro il budget
+  const file = path.join(tmp, 'budget-429.jsonl')
+  const r = spawnSync(process.execPath, ['--import', budget, '--input-type=module', '-e', `
+    import http from 'node:http'
+    const srv = http.createServer((q, r) => { r.writeHead(429); r.end('{}') }).listen(0, '127.0.0.1')
+    await new Promise((r) => srv.once('listening', r))
+    const url = 'http://127.0.0.1:' + srv.address().port + '/x'
+    const out = []
+    for (let i = 0; i < 3; i++) out.push((await fetch(url)).status)
+    srv.closeAllConnections(); srv.close()
+    console.log(JSON.stringify(out))`], { encoding: 'utf8', env: { ...process.env, AI_BUDGET_HOST: '127.0.0.1', AI_BUDGET_MAX: '300', AI_BUDGET_FILE: file } })
+  assert.deepEqual(JSON.parse(r.stdout.trim()), [429, 429, 429])
 })
 
 await step('check-run: retry AI distinti dai cicli, errori Hyperliquid non contati come tentativi AI, nessun falso allarme dalle notizie', () => {
@@ -225,15 +260,18 @@ await step('launcher: errore di avvio -> nessun conto creato, nessuna chiamata',
   assert.equal(fs.existsSync(path.join(dir, 'fake-post-received')), false)
 })
 
-await step('launcher: errore 403 -> arresto immediato', () => {
+// Il client originale non ripete le richieste dopo 401/403/404 e i cicli reali distano 300 s: il
+// launcher deve fermare l'app prima del ciclo successivo. Qui i cicli distano 3 s, molto piu del tempo di
+// rilevamento (controllo ogni 300 ms) e di arresto (anche con taskkill su Windows): deve partire 1 sola richiesta.
+await step('launcher: errore 403 -> arresto prima del ciclo successivo', () => {
   const dir = path.join(tmp, 'auth')
-  const r = runPilot(dir, 'auth_error', fakeArgs(5793))
+  const r = node([path.join(pilotDir, 'run-pilot.mjs'), '--run-dir', dir, ...fakeArgs(5793)], { FAKE_SCENARIO: 'auth_error', FAKE_CYCLE_MS: '3000' })
   assert.equal(r.status, 2)
   const meta = JSON.parse(fs.readFileSync(path.join(dir, 'run-meta.json'), 'utf8'))
   assert.equal(meta.status, 'stopped')
   assert.ok(meta.reasons.some((x) => x.includes('401/403/404')), meta.reasons.join('; '))
   const trace = fs.readFileSync(path.join(dir, 'trace.jsonl'), 'utf8').split('\n').filter((l) => l.includes('"request"'))
-  assert.ok(trace.length <= 2, `${trace.length} richieste prima dell'arresto`)
+  assert.equal(trace.length, 1, `${trace.length} richieste prima dell'arresto`)
 })
 
 async function startFake(dir, port, extraEnv = {}, extraArgs = []) {

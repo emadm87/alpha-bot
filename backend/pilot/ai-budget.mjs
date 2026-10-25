@@ -4,6 +4,9 @@
 // Il limite vale per il processo dell'app: un riavvio dell'app riparte da zero.
 // Non conosce la quota del provider: un 429 indica limite di frequenza o quota (es. RPD) raggiunti, e una
 // quota dichiarata (es. 500 RPD) non garantisce che le richieste vengano servite.
+// Dopo una risposta 401/403/404 (chiave o modello non validi; AI_BUDGET_STOP_ON per cambiarli) ogni
+// richiesta successiva viene rifiutata senza essere inviata, anche se il monitor del launcher non ha
+// ancora fermato l'app.
 // Registro JSONL in AI_BUDGET_FILE: ora, pid, numero del tentativo, percorso, stato HTTP o errore, classe.
 // Non legge ne registra intestazioni, corpi o chiavi.
 //
@@ -15,7 +18,9 @@ import fs from 'node:fs'
 const HOST = process.env.AI_BUDGET_HOST ?? 'generativelanguage.googleapis.com'
 const MAX = Number(process.env.AI_BUDGET_MAX ?? 12)
 const FILE = process.env.AI_BUDGET_FILE
+const STOP_ON = new Set(String(process.env.AI_BUDGET_STOP_ON ?? '401,403,404').split(',').map(Number).filter(Boolean))
 let used = 0
+let tripped = null
 
 const record = (x) => {
   if (!FILE) return
@@ -34,6 +39,10 @@ if (typeof original === 'function' && Number.isFinite(MAX)) {
       url = new URL(typeof input === 'string' || input instanceof URL ? String(input) : input.url)
     } catch {}
     if (!url || url.hostname !== HOST) return original(input, init)
+    if (tripped !== null) {
+      record({ attempt: null, path: url.pathname, result: 'blocked_after_error', status: tripped })
+      throw new Error(`AI requests disabled after HTTP ${tripped}: request not sent`)
+    }
     if (used >= MAX) {
       record({ attempt: null, path: url.pathname, result: 'blocked_budget_exhausted', max: MAX })
       throw new Error(`AI attempt budget exhausted (${MAX}): request not sent`)
@@ -44,6 +53,7 @@ if (typeof original === 'function' && Number.isFinite(MAX)) {
     try {
       const res = await original(input, init)
       record({ attempt: n, status: res.status, result: 'response', class: classify(res.status) })
+      if (STOP_ON.has(res.status)) tripped = res.status
       return res
     } catch (e) {
       const name = String(e?.name ?? 'Error')

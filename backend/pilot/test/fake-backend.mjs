@@ -56,7 +56,8 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ id: 2 }))
     runCycle()
-    setInterval(runCycle, 200)
+    // cadenza dei cicli (reale: 300 s); FAKE_CYCLE_MS la rende piu lenta del tempo di rilevamento
+    setInterval(runCycle, Number(process.env.FAKE_CYCLE_MS ?? 200))
   } else {
     res.writeHead(404)
     res.end()
