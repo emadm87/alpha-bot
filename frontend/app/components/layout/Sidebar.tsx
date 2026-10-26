@@ -81,7 +81,7 @@ export default function Sidebar({ currentPage = 'comprehensive', onPageChange, o
                 ? 'bg-secondary/80 text-secondary-foreground'
                 : 'hover:bg-muted text-muted-foreground'
             }`}
-            onClick={() => onPageChange?.('asset-curve')}
+            onClick={() => onPageChange?.('comprehensive')}
             title="Asset Curve"
           >
             <TrendingUp className="w-5 h-5" />
