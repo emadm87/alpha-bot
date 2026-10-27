@@ -54,6 +54,13 @@ export async function initializeServices(): Promise<void> {
     startMarginMonitor(5)
     logger.info('Margin monitor started (5-second interval)')
 
+    // Hourly funding of the 'hyperliquid' cost model: captures the oracle
+    // price right after each hour and settles due hours (every 10 seconds;
+    // nothing to do, and no request, without a hyperliquid account)
+    const { runFundingTasks } = await import('./fundingSettlement.js')
+    taskScheduler.addIntervalTask(() => runFundingTasks(), 10, 'funding_settlement')
+    logger.info('Funding settlement task started (10-second interval, hyperliquid cost model only)')
+
     logger.info('All services initialized successfully')
   } catch (e) {
     logger.error(`Service initialization failed: ${e}`)

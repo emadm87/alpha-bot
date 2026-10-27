@@ -144,8 +144,9 @@ test('2. hyperliquid: 0.045% on open, partial close, full close, LONG and SHORT'
   near(f[1]!.commission, 0.09225, 'partial close')
   const rep = assertReconciled(id, PRICES)
   assert.equal(rep.cost_model.model, 'hyperliquid')
-  assert.match(rep.cost_model.note, /SOLO la commissione/)
-  assert.match(rep.cost_model.note, /Funding, liquidazioni, mark price, spread e slippage NON/)
+  assert.match(rep.cost_model.note, /commissione taker perpetual di Hyperliquid al livello base/)
+  assert.match(rep.cost_model.note, /Mark price, liquidazioni cross, precisione degli ordini e bid\/ask NON/)
+  assert.ok(fills(id).every((t) => t.interestCharged === 0), 'no original interest (funding instead, 006I-2)')
   // the gap between the models is only the fee difference
   near(account(id).currentCash + interestOf(id) - scenarioCash(OG), (OG - HL) * 1471.25, 'difference = fees only', 1e-9)
 })

@@ -179,6 +179,48 @@ export const trades = sqliteTable(
   }),
 )
 
+/**
+ * Hourly funding of the 'hyperliquid' cost model (Task 006I-2): one row per
+ * account, coin and funding hour in which the account held a perpetual.
+ * `amount` is the cash change (+ received, - paid); rows that could not be
+ * settled keep amount 0 and say why in `status`.
+ */
+export const fundingPayments = sqliteTable(
+  'funding_payments',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    accountId: integer('account_id').notNull(),
+    symbol: text('symbol').notNull(),
+    /** Funding hour, ms since epoch (a multiple of one hour). */
+    fundingTime: integer('funding_time').notNull(),
+    /** 'settled' | 'missing_oracle' | 'missing_rate' */
+    status: text('status').notNull(),
+    side: text('side').notNull(),
+    /** Position size held at the funding hour. */
+    quantity: real('quantity').notNull(),
+    oraclePrice: real('oracle_price'),
+    /** When the oracle price was received, ms since epoch. */
+    oracleReceivedAt: integer('oracle_received_at'),
+    /** Hourly funding rate from Hyperliquid's fundingHistory. */
+    fundingRate: real('funding_rate'),
+    /** `time` of that fundingHistory entry, ms since epoch. */
+    rateTime: integer('rate_time'),
+    amount: real('amount').notNull().default(0),
+    createdAt: createdAt(),
+  },
+  (t) => ({
+    idIdx: index('ix_funding_payments_id').on(t.id),
+  }),
+)
+
+/** Oracle prices captured live right after each funding hour (Task 006I-2). */
+export const fundingOraclePrices = sqliteTable('funding_oracle_prices', {
+  fundingTime: integer('funding_time').notNull(),
+  symbol: text('symbol').notNull(),
+  oraclePrice: real('oracle_price').notNull(),
+  receivedAt: integer('received_at').notNull(),
+})
+
 export const tradingConfigs = sqliteTable(
   'trading_configs',
   {

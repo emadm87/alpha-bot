@@ -171,6 +171,10 @@ export async function placeAndExecuteCrypto(params: {
     // Taker fee of the account's cost model, on open, close and liquidation
     const feeRate = takerFeeRate(booked.costModel)
     const takerFee = notional * feeRate
+    // The 'hyperliquid' model pays hourly funding (fundingSettlement) instead
+    // of the original interest on the borrowed part
+    const hyperliquid = booked.costModel === 'hyperliquid'
+    const interestOn = (p: Position) => (hyperliquid ? 0 : calculatePositionInterest(p))
 
     // A perpetual would overwrite a spot holding (side null, from
     // orderMatching) on the same row: refused until the holding is closed.
@@ -209,7 +213,7 @@ export async function placeAndExecuteCrypto(params: {
 
       if (pos && pos.side && pos.quantity > 0) {
         // Existing perpetual position (any leverage) — settle interest before modifying
-        interestCharged = calculatePositionInterest(pos)
+        interestCharged = interestOn(pos)
         if (interestCharged > 0) {
           if (currentCash < interestCharged) {
             throw new Error(
@@ -312,7 +316,7 @@ export async function placeAndExecuteCrypto(params: {
 
       // Settled within the same update as the released margin and P&L below,
       // so a close is never refused because free cash alone is short of it
-      interestCharged = calculatePositionInterest(pos)
+      interestCharged = interestOn(pos)
       currentCash -= interestCharged
 
       // A SHORT closes here at any leverage: the spot branch below only sells
@@ -420,6 +424,9 @@ export async function placeAndExecuteCrypto(params: {
         takerFee,
         interestCharged,
         feeRate,
+        // millisecond time, so the position held at each funding hour can be
+        // rebuilt exactly from the fills (the original keeps whole seconds)
+        ...(hyperliquid ? { tradeTime: utcNow() } : {}),
       })
       .run()
 

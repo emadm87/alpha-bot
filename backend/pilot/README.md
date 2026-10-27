@@ -91,9 +91,13 @@ Per la prova da 24 h (autorizzazione separata): `--cycles 288 --max-attempts 300
 immutabile, quindi una prova non mescola mai due modelli:
 
 - `original`: regole dell'autore (commissione taker 0,07%, interessi, monitor e prezzi originali);
-- `hyperliquid`: per ora cambia **solo** la commissione taker perpetual (0,045%, livello base di
-  Hyperliquid senza sconti: un'ipotesi esplicita). Funding, liquidazioni, mark price, spread e
-  slippage non sono ancora modellati.
+- `hyperliquid`: commissione taker perpetual 0,045% (livello base di Hyperliquid senza sconti:
+  un'ipotesi esplicita) e **funding orario** al posto degli interessi: a ogni ora piena, per ogni
+  perpetual tenuta (anche 1x), quantità × prezzo oracle × tasso orario realizzato; con tasso positivo
+  paga il LONG e incassa lo SHORT. Il tasso viene da `fundingHistory`; il prezzo oracle viene
+  catturato dall'app entro 60 s dall'ora (Hyperliquid non ne pubblica lo storico): se l'app era ferma
+  a quell'ora, l'ora resta **non regolata** (`missing_oracle`), senza importo. Mark price,
+  liquidazioni cross, precisione degli ordini e bid/ask non sono ancora modellati.
 
 Il launcher invia il modello alla creazione del conto e si ferma se l'app risponde con un altro
 modello. Fuori dal launcher lo stesso valore si può dare con la variabile `ALPHA_COST_MODEL` (usata
@@ -189,6 +193,9 @@ Contiene:
 - `cost_model`: modello economico del conto, tasso taker applicato e tassi registrati nei fill, con
   la nota di cosa il modello copre;
 - commissioni e interessi addebitati, e a parte quelli maturati ma non addebitati;
+- `funding` (modello hyperliquid): pagato, ricevuto e netto, già inclusi in cassa, equity e netto;
+  ore regolate, non regolate per dati mancanti (`missing_oracle`, `missing_rate`) e non registrate
+  (regolazione in attesa o app ferma);
 - `if_closed`, separato dal risultato registrato: commissione stimata per chiudere ogni posizione
   aperta al prezzo finale (commissione taker del motore), interessi maturati non addebitati, P&L netto
   ed equity finale ipotetici dopo la chiusura, in USDC e %. È una stima: nessuno spread, slippage,

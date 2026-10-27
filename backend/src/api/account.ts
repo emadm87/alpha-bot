@@ -17,6 +17,7 @@ import {
 import { calcAccountEquity } from '../services/assetCalculator.js'
 import {
   accountFills,
+  accountFunding,
   curvePoint,
   klineCloseAt,
   replayEquity,
@@ -226,6 +227,7 @@ accountRoutes.get('/asset-curve/timeframe', async (c) => {
 
     for (const account of activeAccounts) {
       const fills = accountFills(account.id)
+      const funding = accountFunding(account.id)
 
       if (fills.length === 0) {
         // No trades, return initial capital at all timestamps
@@ -259,7 +261,7 @@ accountRoutes.get('/asset-curve/timeframe', async (c) => {
         } else {
           const replayed = replayEquity(account.initialCapital, fills, ts * 1000, (symbol, market) =>
             klineCloseAt(symbolKlines.get(`${symbol} ${market}`), ts),
-          )
+          funding)
           result.push(curvePoint(account, ts, datetimeStr, replayed))
         }
       }

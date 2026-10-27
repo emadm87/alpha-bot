@@ -168,6 +168,15 @@ class HyperliquidClient {
     })
   }
 
+  /**
+   * Realised hourly funding of a perpetual: rows { coin, fundingRate,
+   * premium, time } from the public fundingHistory request, oldest first.
+   * Errors are thrown so the caller can retry later.
+   */
+  async getFundingHistory(coin: string, startTime: number, endTime: number): Promise<unknown> {
+    return this.getExchange().publicPostInfo({ type: 'fundingHistory', coin, startTime, endTime })
+  }
+
   async getKlineData(
     symbol: string,
     period = '1d',
@@ -295,6 +304,9 @@ export const getCandleSnapshotFromHyperliquid = (
   startTime: number,
   endTime: number,
 ) => hyperliquidClient.getCandleSnapshot(coin, interval, startTime, endTime)
+
+export const getFundingHistoryFromHyperliquid = (coin: string, startTime: number, endTime: number) =>
+  hyperliquidClient.getFundingHistory(coin, startTime, endTime)
 
 export const getKlineDataFromHyperliquid = (
   symbol: string,

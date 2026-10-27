@@ -27,9 +27,10 @@ const FEE_BY_MODEL = {
 const RATE_H = engineConstant('CRYPTO_INTEREST_RATE_HOURLY') // interessi orari sulla parte presa a prestito
 const MODEL_NOTES = {
   original: 'regole economiche dell\'autore: commissione taker 0,07%, interessi sulla parte a prestito, liquidazione e prezzi originali',
-  hyperliquid: 'riproduce SOLO la commissione taker perpetual di Hyperliquid al livello base (ipotesi: volume a 14 giorni < 5M USD, ' +
-    'nessuno sconto). Funding, liquidazioni, mark price, spread e slippage NON sono ancora modellati: interessi, monitor e prezzi ' +
-    'restano quelli dell\'originale',
+  hyperliquid: 'riproduce la commissione taker perpetual di Hyperliquid al livello base (ipotesi: volume a 14 giorni < 5M USD, ' +
+    'nessuno sconto) e il funding orario (tasso realizzato da fundingHistory x oracle price catturato all\'ora x quantita; ' +
+    'gli interessi dell\'originale non si applicano). Mark price, liquidazioni cross, precisione degli ordini e bid/ask NON ' +
+    'sono ancora modellati: monitor, liquidazioni e prezzi di esecuzione restano quelli dell\'originale',
 }
 
 export function buildReport({ dbFile, traceFile, accountId: requested, prices, at, priceIn, priceOut }) {
@@ -51,6 +52,10 @@ const trades = db.prepare('SELECT t.*, o.order_no, o.leverage AS order_leverage 
 const orders = db.prepare('SELECT * FROM orders WHERE account_id=?').all(accountId)
 const positions = db.prepare('SELECT * FROM positions WHERE account_id=? AND quantity>0').all(accountId)
 const decisions = db.prepare('SELECT * FROM ai_decision_logs WHERE account_id=? ORDER BY decision_time, id').all(accountId)
+const hasFunding = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='funding_payments'").get()
+const fundingRows = hasFunding
+  ? db.prepare('SELECT * FROM funding_payments WHERE account_id=? ORDER BY funding_time, symbol').all(accountId)
+  : [] // database precedenti al 006I-2: nessun funding
 
 // --- traccia: prezzi e Total Assets per ciclo ------------------------------------------
 let trace = []
@@ -77,6 +82,7 @@ const count = { LONG: 0, SHORT: 0, close_long: 0, close_short: 0 }
 for (const t of trades) {
   fees += t.commission // commissione registrata una sola volta per fill (= taker_fee nel motore)
   interest += t.interest_charged
+  if (costModel === 'hyperliquid' && t.interest_charged !== 0) issues.push(`trade ${t.id}: interessi dell'originale in modalita hyperliquid`)
   if (t.taker_fee === 0) issues.push(`trade ${t.id}: taker_fee 0 (orderMatching, non motore perpetual)`)
   else {
     // tasso registrato dal fill (dal 006I-1) o, per i fill precedenti, quello del modello del conto
@@ -121,7 +127,7 @@ for (const p of positions) {
   // interessi maturati non addebitati: stessa formula del motore, margine ricostruito come
   // positionMargin quando la riga non lo registra
   let positionAccrued = 0
-  if (p.leverage > 1 && p.last_interest_time) {
+  if (costModel !== 'hyperliquid' && p.leverage > 1 && p.last_interest_time) {
     const hours = (Date.parse(asOf) - dbMs(p.last_interest_time)) / 3_600_000
     const margin = p.margin ?? (p.quantity * p.avg_cost) / p.leverage
     positionAccrued = Math.max(p.quantity * p.avg_cost - margin, 0) * RATE_H * Math.max(hours, 0)
@@ -141,9 +147,46 @@ for (const [s, b] of Object.entries(book)) {
   if (b.qty > 0 && !positions.some((p) => p.symbol === s)) issues.push(`${s}: fill aperti senza riga di posizione`)
 }
 
+// --- funding orario (modello hyperliquid) ---------------------------------------------------
+// Le righe regolate hanno gia cambiato la cassa; le altre non hanno importo. Le ore in cui il conto
+// teneva una perpetual senza alcuna riga sono "non registrate" (in attesa o app ferma).
+const HOUR = 3_600_000
+let fundingNet = 0, fundingPaid = 0, fundingReceived = 0
+const fundingStatus = { settled: 0, missing_oracle: 0, missing_rate: 0 }
+for (const f of fundingRows) {
+  fundingStatus[f.status] = (fundingStatus[f.status] ?? 0) + 1
+  if (f.status !== 'settled') {
+    if (f.amount !== 0) issues.push(`funding ${f.id}: importo ${f.amount} su un'ora non regolata`)
+    continue
+  }
+  const expected = (f.side === 'LONG' ? -1 : 1) * f.quantity * f.oracle_price * f.funding_rate
+  if (Math.abs(f.amount - expected) > 1e-9) issues.push(`funding ${f.id}: importo ${f.amount} diverso da quantita x oracle x tasso (${expected})`)
+  fundingNet += f.amount
+  if (f.amount < 0) fundingPaid -= f.amount
+  else fundingReceived += f.amount
+}
+if (costModel !== 'hyperliquid' && fundingRows.length) issues.push('funding registrato su un conto non hyperliquid')
+let fundingNotRecorded = 0
+if (costModel === 'hyperliquid') {
+  // posizioni tenute a ogni ora: fill del motore datati strettamente prima dell'ora
+  const perp = trades.filter((t) => t.taker_fee > 0).map((t) => ({ ...t, ms: dbMs(t.trade_time) })).sort((a, b) => a.ms - b.ms)
+  const recorded = new Set(fundingRows.map((f) => `${f.symbol} ${f.funding_time}`))
+  const end = Math.floor(Date.parse(asOf) / HOUR) * HOUR
+  for (let h = perp.length ? Math.floor(perp[0].ms / HOUR) * HOUR + HOUR : Infinity; h <= end; h += HOUR) {
+    const held = {}
+    for (const t of perp) {
+      if (!(t.ms < h)) break
+      const q = held[t.symbol] ?? 0
+      held[t.symbol] = Number((t.side === 'LONG' || t.side === 'SHORT' ? q + t.quantity : q - t.quantity).toFixed(6))
+    }
+    for (const [sym, q] of Object.entries(held)) if (q > 0 && !recorded.has(`${sym} ${h}`)) fundingNotRecorded++
+  }
+}
+
 // --- riconciliazione: ogni costo compare una sola volta --------------------------------------
-// cassa = capitale + P&L realizzato - commissioni - interessi addebitati - margine delle posizioni aperte
-const cashExpected = acc.initial_capital + realized - fees - interest - openMargin
+// cassa = capitale + P&L realizzato - commissioni - interessi addebitati + funding netto
+//         - margine delle posizioni aperte
+const cashExpected = acc.initial_capital + realized - fees - interest + fundingNet - openMargin
 const cashDiff = acc.current_cash - cashExpected
 if (Math.abs(cashDiff) > 1e-6) issues.push(`cassa non riconciliata: registrata ${acc.current_cash}, attesa ${cashExpected} (diff ${cashDiff})`)
 // margine ricostruito come positionMargin per le righe senza margine registrato (database precedenti)
@@ -152,8 +195,8 @@ const marginUsedExpected = positions.filter((p) => p.leverage > 1)
 if (Math.abs(acc.margin_used - marginUsedExpected) > 1e-6) issues.push(`marginUsed ${acc.margin_used} vs ${marginUsedExpected}`)
 const finalEquity = acc.current_cash + openMargin + unrealized
 const gross = realized + unrealized
-const net = finalEquity - acc.initial_capital // = lordo - commissioni - interessi addebitati
-if (Math.abs(net - (gross - fees - interest)) > 1e-6) issues.push('identita netto = lordo - costi non verificata')
+const net = finalEquity - acc.initial_capital // = lordo - commissioni - interessi addebitati + funding netto
+if (Math.abs(net - (gross - fees - interest + fundingNet)) > 1e-6) issues.push('identita netto = lordo - costi non verificata')
 for (const o of orders) if (o.status !== 'FILLED') issues.push(`ordine ${o.id} ${o.status}`)
 
 // --- serie di equity: Total Assets per ciclo + valore finale -----------------------------------
@@ -210,14 +253,33 @@ return {
   capital: { initial: acc.initial_capital, final_equity: r(finalEquity), cash: r(acc.current_cash), open_margin: r(openMargin) },
   pnl: {
     gross_usdc: r(gross), gross_pct: pct(gross), realized: r(realized), unrealized: r(unrealized),
-    fees: r(fees), interest_charged: r(interest), net_usdc: r(net), net_pct: pct(net),
+    fees: r(fees), interest_charged: r(interest), funding_net: r(fundingNet, 6), net_usdc: r(net), net_pct: pct(net),
     accrued_interest_not_charged: r(accrued, 6), net_after_accrued_usdc: r(net - accrued),
+  },
+  // Funding orario Hyperliquid: separato da commissioni e interessi, gia incluso in cassa, equity e netto.
+  funding: {
+    applies: costModel === 'hyperliquid',
+    paid_usdc: r(fundingPaid, 6), received_usdc: r(fundingReceived, 6), net_usdc: r(fundingNet, 6),
+    intervals: {
+      settled: fundingStatus.settled,
+      not_settled_missing_oracle: fundingStatus.missing_oracle,
+      not_settled_missing_rate: fundingStatus.missing_rate,
+      not_recorded: fundingNotRecorded,
+    },
+    note: costModel === 'hyperliquid'
+      ? 'ore non regolate: nessun importo (prezzo oracle non catturato entro 60 s dall\'ora, o tasso non pubblicato entro 6 h); ' +
+        'non registrate: ore con posizione senza riga (regolazione in attesa o app ferma)'
+      : 'non applicato: il modello originale usa gli interessi',
   },
   // Stima, non un risultato registrato: tutte le posizioni aperte chiuse ai prezzi finali.
   if_closed: {
     basis: `chiusura ipotetica di ${positions.length} posizioni aperte ai prezzi finali (${prices ? 'argomento' : 'ultimo prompt'}) alle ${asOf}; ` +
-      `commissione taker del modello ${costModel} ${r(FEE * 100, 4)}% sul nozionale di uscita, interessi maturati a ${r(RATE_H * 100, 6)}%/h sulla parte a prestito; ` +
-      'nessuno spread, slippage, impatto di prezzo o funding',
+      `commissione taker del modello ${costModel} ${r(FEE * 100, 4)}% sul nozionale di uscita; ` +
+      (costModel === 'hyperliquid'
+        ? 'funding delle ore gia regolate incluso nell\'equity, nessun funding per l\'ora in corso (si paga solo allo scoccare dell\'ora); '
+        : `interessi maturati a ${r(RATE_H * 100, 6)}%/h sulla parte a prestito; `) +
+      'nessuno spread, slippage o impatto di prezzo',
+    funding_not_settled_intervals: fundingStatus.missing_oracle + fundingStatus.missing_rate + fundingNotRecorded,
     open_positions: positions.length,
     complete: closingComplete,
     closing_fees_estimated: r(closingFees, 6),

@@ -259,6 +259,37 @@ BEGIN
 END;
 `)
 
+  // Hourly funding of the 'hyperliquid' cost model (Task 006I-2): at most one
+  // row per account, coin and funding hour, so a payment is never made twice.
+  sqlite.exec(`
+CREATE TABLE IF NOT EXISTS funding_payments (
+	id INTEGER NOT NULL,
+	account_id INTEGER NOT NULL,
+	symbol VARCHAR(20) NOT NULL,
+	funding_time INTEGER NOT NULL,
+	status VARCHAR(20) NOT NULL CHECK (status IN ('settled', 'missing_oracle', 'missing_rate')),
+	side VARCHAR(10) NOT NULL,
+	quantity FLOAT NOT NULL,
+	oracle_price FLOAT,
+	oracle_received_at INTEGER,
+	funding_rate FLOAT,
+	rate_time INTEGER,
+	amount FLOAT NOT NULL DEFAULT 0,
+	created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+	PRIMARY KEY (id),
+	FOREIGN KEY(account_id) REFERENCES accounts (id),
+	UNIQUE (account_id, symbol, funding_time)
+);
+CREATE INDEX IF NOT EXISTS ix_funding_payments_id ON funding_payments (id);
+CREATE TABLE IF NOT EXISTS funding_oracle_prices (
+	funding_time INTEGER NOT NULL,
+	symbol VARCHAR(20) NOT NULL,
+	oracle_price FLOAT NOT NULL,
+	received_at INTEGER NOT NULL,
+	PRIMARY KEY (funding_time, symbol)
+);
+`)
+
   // Fee rate the engine applied to each fill; older and manual fills keep NULL.
   const tradeColumns = sqlite.prepare('PRAGMA table_info(trades)').all() as { name: string }[]
   if (!tradeColumns.some((c) => c.name === 'fee_rate')) {
