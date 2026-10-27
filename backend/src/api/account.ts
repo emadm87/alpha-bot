@@ -9,7 +9,10 @@ import {
   positions as positionsTable,
   trades as tradesTable,
   users,
+  COST_MODELS,
+  DEFAULT_COST_MODEL,
   type Account,
+  type CostModel,
 } from '../db/schema.js'
 import { calcAccountEquity } from '../services/assetCalculator.js'
 import {
@@ -40,7 +43,23 @@ function accountPayload(account: Account, username: string) {
     base_url: account.baseUrl,
     api_key: account.apiKey,
     is_active: account.isActive === 'true',
+    cost_model: account.costModel,
   }
+}
+
+/**
+ * Cost model of a new account: the request's `cost_model`, else the
+ * ALPHA_COST_MODEL environment variable (pilot runs), else 'original'.
+ */
+function newAccountCostModel(requested: unknown): CostModel {
+  const env = process.env.ALPHA_COST_MODEL?.trim()
+  const value = requested ?? (env ? env : DEFAULT_COST_MODEL)
+  if (!(COST_MODELS as readonly unknown[]).includes(value)) {
+    throw new HTTPException(400, {
+      message: `Invalid cost_model ${JSON.stringify(value)}: must be one of ${COST_MODELS.join(', ')}`,
+    })
+  }
+  return value as CostModel
 }
 
 /** Get all active accounts (for paper trading demo). */
@@ -366,6 +385,7 @@ accountRoutes.post('/', async (c) => {
     }
 
     const initialCapital = Number(payload.initial_capital ?? 10000.0)
+    const costModel = newAccountCostModel(payload.cost_model)
 
     const newAccount = db
       .insert(accounts)
@@ -381,9 +401,11 @@ accountRoutes.post('/', async (c) => {
         currentCash: initialCapital,
         frozenCash: 0.0,
         isActive: 'true',
+        costModel,
       })
       .returning()
       .get()
+    logger.info(`Account ${newAccount.id} created with cost model ${newAccount.costModel}`)
 
     // Reset auto trading job after creating a new account
     try {
@@ -472,6 +494,13 @@ accountRoutes.put('/:accountId', async (c) => {
       .get()
 
     if (!account) throw new HTTPException(404, { message: 'Account not found' })
+
+    // The cost model is fixed at creation: a run never mixes two models
+    if ('cost_model' in payload && payload.cost_model !== account.costModel) {
+      throw new HTTPException(400, {
+        message: `cost_model cannot be changed after the account is created (it is ${account.costModel})`,
+      })
+    }
 
     // Update fields if provided (empty strings are allowed for api_key/base_url)
     const values: Partial<typeof accounts.$inferInsert> = {}

@@ -13,7 +13,7 @@ import {
   CRYPTO_INTEREST_RATE_HOURLY,
   CRYPTO_MAX_LEVERAGE,
   CRYPTO_MIN_ORDER_QUANTITY,
-  CRYPTO_TAKER_FEE_RATE,
+  takerFeeRate,
   type Account,
   type Order,
   type Position,
@@ -21,11 +21,6 @@ import {
 import { positionMargin } from './assetCalculator.js'
 import { getLastPrice } from './marketData.js'
 import { dbDateMs, utcNow } from '../utils/datetime.js'
-
-/** Calculate taker fee for CRYPTO market. */
-function calcCryptoFee(notional: number): number {
-  return notional * CRYPTO_TAKER_FEE_RATE
-}
 
 /**
  * Round a quantity to the 6 decimals order quantities already use
@@ -131,7 +126,6 @@ export async function placeAndExecuteCrypto(params: {
       : await getLastPrice(symbol, 'CRYPTO')
 
   const notional = execPrice * quantity
-  const takerFee = calcCryptoFee(notional)
 
   return db.transaction((tx) => {
     const order = tx
@@ -173,6 +167,10 @@ export async function placeAndExecuteCrypto(params: {
     // liquidation changed it, and writing it back would create or destroy cash.
     const booked = tx.select().from(accounts).where(eq(accounts.id, account.id)).get()
     if (!booked) throw new Error(`Account ${account.id} not found`)
+
+    // Taker fee of the account's cost model, on open, close and liquidation
+    const feeRate = takerFeeRate(booked.costModel)
+    const takerFee = notional * feeRate
 
     // A perpetual would overwrite a spot holding (side null, from
     // orderMatching) on the same row: refused until the holding is closed.
@@ -421,6 +419,7 @@ export async function placeAndExecuteCrypto(params: {
         commission: takerFee,
         takerFee,
         interestCharged,
+        feeRate,
       })
       .run()
 

@@ -19,8 +19,18 @@ export function engineConstant(name, schemaText = fs.readFileSync(new URL('../sr
   if (!Number.isFinite(value)) throw new Error(`costante ${name} non trovata in src/db/schema.ts`)
   return value
 }
-const FEE = engineConstant('CRYPTO_TAKER_FEE_RATE') // commissione taker del motore (apertura e chiusura)
+// commissione taker del motore per modello economico del conto (takerFeeRate in schema.ts)
+const FEE_BY_MODEL = {
+  original: engineConstant('CRYPTO_TAKER_FEE_RATE'),
+  hyperliquid: engineConstant('HL_PERP_TAKER_FEE_RATE'),
+}
 const RATE_H = engineConstant('CRYPTO_INTEREST_RATE_HOURLY') // interessi orari sulla parte presa a prestito
+const MODEL_NOTES = {
+  original: 'regole economiche dell\'autore: commissione taker 0,07%, interessi sulla parte a prestito, liquidazione e prezzi originali',
+  hyperliquid: 'riproduce SOLO la commissione taker perpetual di Hyperliquid al livello base (ipotesi: volume a 14 giorni < 5M USD, ' +
+    'nessuno sconto). Funding, liquidazioni, mark price, spread e slippage NON sono ancora modellati: interessi, monitor e prezzi ' +
+    'restano quelli dell\'originale',
+}
 
 export function buildReport({ dbFile, traceFile, accountId: requested, prices, at, priceIn, priceOut }) {
 const db = new Database(dbFile, { readonly: true, fileMustExist: true })
@@ -33,6 +43,10 @@ const valid = db.prepare(`SELECT * FROM accounts WHERE account_type='AI' AND is_
 const accountId = Number(requested ?? (valid.length === 1 ? valid[0].id : NaN))
 if (!Number.isFinite(accountId)) throw new Error(`specify --account: ${valid.length} operating AI accounts`)
 const acc = db.prepare('SELECT * FROM accounts WHERE id=?').get(accountId)
+if (!acc) throw new Error(`account ${accountId} non trovato`)
+const costModel = acc.cost_model ?? 'original' // database precedenti al 006I-1: solo regole originali
+const FEE = FEE_BY_MODEL[costModel]
+if (FEE === undefined) throw new Error(`modello economico sconosciuto: ${costModel}`)
 const trades = db.prepare('SELECT t.*, o.order_no, o.leverage AS order_leverage FROM trades t JOIN orders o ON o.id=t.order_id WHERE t.account_id=? ORDER BY t.trade_time, t.id').all(accountId)
 const orders = db.prepare('SELECT * FROM orders WHERE account_id=?').all(accountId)
 const positions = db.prepare('SELECT * FROM positions WHERE account_id=? AND quantity>0').all(accountId)
@@ -58,11 +72,19 @@ const book = {} // symbol -> { side, qty, avg }
 const closes = [] // P&L lordo per chiusura
 const lifecycles = [] // P&L lordo per posizione aperta->chiusa
 let fees = 0, interest = 0, realized = 0
+const feeRates = new Set()
 const count = { LONG: 0, SHORT: 0, close_long: 0, close_short: 0 }
 for (const t of trades) {
   fees += t.commission // commissione registrata una sola volta per fill (= taker_fee nel motore)
   interest += t.interest_charged
   if (t.taker_fee === 0) issues.push(`trade ${t.id}: taker_fee 0 (orderMatching, non motore perpetual)`)
+  else {
+    // tasso registrato dal fill (dal 006I-1) o, per i fill precedenti, quello del modello del conto
+    const rate = t.fee_rate ?? FEE
+    feeRates.add(rate)
+    if (t.fee_rate != null && t.fee_rate !== FEE) issues.push(`trade ${t.id}: tasso ${t.fee_rate} diverso dal modello ${costModel} (${FEE})`)
+    if (Math.abs(t.commission - t.price * t.quantity * rate) > 1e-9) issues.push(`trade ${t.id}: commissione ${t.commission} diversa da ${rate} x nozionale`)
+  }
   const b = (book[t.symbol] ??= { side: null, qty: 0, avg: 0, pnl: 0 })
   if (t.side === 'LONG' || t.side === 'SHORT') {
     count[t.side]++
@@ -124,7 +146,9 @@ for (const [s, b] of Object.entries(book)) {
 const cashExpected = acc.initial_capital + realized - fees - interest - openMargin
 const cashDiff = acc.current_cash - cashExpected
 if (Math.abs(cashDiff) > 1e-6) issues.push(`cassa non riconciliata: registrata ${acc.current_cash}, attesa ${cashExpected} (diff ${cashDiff})`)
-const marginUsedExpected = positions.filter((p) => p.leverage > 1).reduce((s, p) => s + (p.margin ?? 0), 0)
+// margine ricostruito come positionMargin per le righe senza margine registrato (database precedenti)
+const marginUsedExpected = positions.filter((p) => p.leverage > 1)
+  .reduce((s, p) => s + (p.margin ?? (p.quantity * p.avg_cost) / p.leverage), 0)
 if (Math.abs(acc.margin_used - marginUsedExpected) > 1e-6) issues.push(`marginUsed ${acc.margin_used} vs ${marginUsedExpected}`)
 const finalEquity = acc.current_cash + openMargin + unrealized
 const gross = realized + unrealized
@@ -175,6 +199,13 @@ const r = (x, d = 4) => (x === null || x === undefined || !Number.isFinite(x) ? 
 const pct = (x) => r((x / acc.initial_capital) * 100, 4)
 return {
   account: { id: acc.id, name: acc.name, model: acc.model },
+  cost_model: {
+    model: costModel,
+    taker_fee_rate: FEE,
+    fee_rates_applied: [...feeRates].sort(),
+    interest_rate_hourly: RATE_H,
+    note: MODEL_NOTES[costModel],
+  },
   window: { from: prompts[0]?.ts ?? decisions[0]?.decision_time ?? null, to: asOf, final_prices_source: prices ? 'argument' : 'last prompt' },
   capital: { initial: acc.initial_capital, final_equity: r(finalEquity), cash: r(acc.current_cash), open_margin: r(openMargin) },
   pnl: {
@@ -185,7 +216,7 @@ return {
   // Stima, non un risultato registrato: tutte le posizioni aperte chiuse ai prezzi finali.
   if_closed: {
     basis: `chiusura ipotetica di ${positions.length} posizioni aperte ai prezzi finali (${prices ? 'argomento' : 'ultimo prompt'}) alle ${asOf}; ` +
-      `commissione taker del motore ${r(FEE * 100, 4)}% sul nozionale di uscita, interessi maturati a ${r(RATE_H * 100, 6)}%/h sulla parte a prestito; ` +
+      `commissione taker del modello ${costModel} ${r(FEE * 100, 4)}% sul nozionale di uscita, interessi maturati a ${r(RATE_H * 100, 6)}%/h sulla parte a prestito; ` +
       'nessuno spread, slippage, impatto di prezzo o funding',
     open_positions: positions.length,
     complete: closingComplete,

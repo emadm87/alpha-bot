@@ -16,6 +16,8 @@
 //   --key-env GEMINI_API_KEY           variabile d'ambiente con la chiave, solo con --key-mode env
 //   --proxy-shim auto | on | off       (auto: carica ccxt-proxy.mjs se HTTPS_PROXY e impostata)
 //   --price-in / --price-out           USD per 1M token, solo per il costo nel report
+//   --cost-model original | hyperliquid  regole economiche del conto (default original). hyperliquid
+//                                      per ora cambia solo la commissione taker (0,045%, livello base)
 //
 // Arresto pulito su qualunque sistema: creare il file STOP nella cartella della prova
 // (es. `type nul > <run-dir>\STOP` su Windows, `touch <run-dir>/STOP` altrove) oppure Ctrl+C nel
@@ -51,6 +53,7 @@ const cfg = {
   proxyShim: flag('--proxy-shim', 'auto'),
   priceIn: flag('--price-in'),
   priceOut: flag('--price-out'),
+  costModel: flag('--cost-model', 'original'),
   // solo per selftest.mjs: sostituisce l'app con un backend finto, senza rete
   testBackend: flag('--test-backend'),
   pollMs: Number(flag('--poll-ms', 15_000)),
@@ -69,6 +72,7 @@ function fail(code, message) {
 
 if (!cfg.runDir) fail(64, 'manca --run-dir (cartella nuova per database, log e traccia)')
 if (!['network-secret', 'env'].includes(cfg.keyMode)) fail(64, `--key-mode non valido: ${cfg.keyMode}`)
+if (!['original', 'hyperliquid'].includes(cfg.costModel)) fail(64, `--cost-model non valido: ${cfg.costModel}`)
 const runDir = path.resolve(cfg.runDir)
 const files = {
   db: path.join(runDir, 'pilot.db'),
@@ -85,7 +89,7 @@ const useShim =
 const plan = {
   run_dir: runDir, cycles: cfg.cycles, max_attempts: cfg.maxAttempts, timeout_min: cfg.timeoutMin,
   model: cfg.model, base_url: cfg.baseUrl, key_mode: cfg.keyMode, proxy_shim: useShim, port: cfg.port,
-  capital_usdc: 1000, markets: 'BTC ETH SOL BNB XRP DOGE (prompt originale)', interval_s: 300,
+  capital_usdc: 1000, cost_model: cfg.costModel, markets: 'BTC ETH SOL BNB XRP DOGE (prompt originale)', interval_s: 300,
 }
 if (!cfg.authorized) {
   console.log(JSON.stringify({ status: 'not_started', reason: 'manca --authorized: nessuna chiamata AI eseguita', plan }, null, 2))
@@ -250,10 +254,15 @@ try {
   const res = await fetch(`http://127.0.0.1:${cfg.port}/api/account`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name: `pilot-${cfg.model}`, model: cfg.model, base_url: cfg.baseUrl, api_key: apiKey, initial_capital: 1000 }),
+    body: JSON.stringify({
+      name: `pilot-${cfg.model}`, model: cfg.model, base_url: cfg.baseUrl, api_key: apiKey, initial_capital: 1000,
+      cost_model: cfg.costModel,
+    }),
   })
   created = await res.json()
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  // un'app precedente al 006I-1 ignorerebbe cost_model: la prova non partirebbe con il modello chiesto
+  if (created.cost_model !== cfg.costModel) throw new Error(`modello economico ${created.cost_model} invece di ${cfg.costModel}`)
 } catch (e) {
   await finish('aborted_account', [`creazione del conto fallita: ${e}`])
 }

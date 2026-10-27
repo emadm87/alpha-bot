@@ -51,10 +51,13 @@ const server = http.createServer((req, res) => {
     fs.writeFileSync(marker, 'yes')
     let body = ''
     req.on('data', (c) => (body += c))
-    req.on('end', () => db.prepare('INSERT INTO accounts (id, api_key) VALUES (2, ?)').run(JSON.parse(body).api_key))
+    req.on('end', () => {
+      const payload = JSON.parse(body)
+      db.prepare('INSERT INTO accounts (id, api_key) VALUES (2, ?)').run(payload.api_key)
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ id: 2, cost_model: payload.cost_model ?? 'original' }))
+    })
     log('INFO', 'services.scheduler', 'Auto trading job reset successfully - interval: 300s; Jobs: []')
-    res.writeHead(200, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify({ id: 2 }))
     runCycle()
     // cadenza dei cicli (reale: 300 s); FAKE_CYCLE_MS la rende piu lenta del tempo di rilevamento
     setInterval(runCycle, Number(process.env.FAKE_CYCLE_MS ?? 200))

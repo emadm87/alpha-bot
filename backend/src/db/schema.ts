@@ -63,6 +63,12 @@ export const accounts = sqliteTable(
     maintenanceMarginRatio: real('maintenance_margin_ratio')
       .notNull()
       .default(0.5),
+    /**
+     * Economic rules of the simulation, fixed when the account is created
+     * (a database trigger refuses any change): 'original' (the author's) or
+     * 'hyperliquid' (only the perpetual taker fee so far). See COST_MODELS.
+     */
+    costModel: text('cost_model').notNull().default('original'),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
@@ -164,6 +170,8 @@ export const trades = sqliteTable(
     takerFee: real('taker_fee').notNull().default(0),
     /** Interest realised by this particular fill. */
     interestCharged: real('interest_charged').notNull().default(0),
+    /** Fee rate the engine applied to this fill; NULL for older or manual fills. */
+    feeRate: real('fee_rate'),
     tradeTime: text('trade_time').default(sql`CURRENT_TIMESTAMP`),
   },
   (t) => ({
@@ -296,6 +304,25 @@ export const CRYPTO_LOT_SIZE = 0.0001
 
 /** Leverage trading constants (Hyperliquid-style) */
 export const CRYPTO_TAKER_FEE_RATE = 0.0007
+/**
+ * Hyperliquid perpetual taker fee at the base tier (14-day volume below 5M
+ * USD, no staking or referral discount):
+ * https://hyperliquid.gitbook.io/hyperliquid-docs/trading/fees
+ * An explicit assumption, not every user's rate.
+ */
+export const HL_PERP_TAKER_FEE_RATE = 0.00045
 export const CRYPTO_INTEREST_RATE_HOURLY = 0.0000125
 export const CRYPTO_MAX_LEVERAGE = 50
 export const CRYPTO_MAINTENANCE_MARGIN_RATIO = 0.5
+
+/** Economic rules an account can be created with. */
+export const COST_MODELS = ['original', 'hyperliquid'] as const
+export type CostModel = (typeof COST_MODELS)[number]
+export const DEFAULT_COST_MODEL: CostModel = 'original'
+
+/** Taker fee rate of the perpetual engine under a cost model. */
+export function takerFeeRate(costModel: string): number {
+  if (costModel === 'hyperliquid') return HL_PERP_TAKER_FEE_RATE
+  if (costModel === 'original') return CRYPTO_TAKER_FEE_RATE
+  throw new Error(`Unknown cost model: ${costModel}`)
+}

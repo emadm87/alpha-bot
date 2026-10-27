@@ -240,4 +240,28 @@ CREATE INDEX IF NOT EXISTS ix_ai_decision_logs_decision_time ON ai_decision_logs
   if (!positionColumns.some((c) => c.name === 'margin')) {
     sqlite.exec('ALTER TABLE positions ADD COLUMN margin REAL')
   }
+
+  // Cost model per account (Task 006I-1): existing accounts become
+  // 'original'; once set it cannot change, so a run never mixes two models.
+  const accountColumns = sqlite.prepare('PRAGMA table_info(accounts)').all() as { name: string }[]
+  if (!accountColumns.some((c) => c.name === 'cost_model')) {
+    sqlite.exec(
+      "ALTER TABLE accounts ADD COLUMN cost_model VARCHAR(20) NOT NULL DEFAULT 'original' " +
+        "CHECK (cost_model IN ('original', 'hyperliquid'))",
+    )
+  }
+  sqlite.exec(`
+CREATE TRIGGER IF NOT EXISTS accounts_cost_model_immutable
+BEFORE UPDATE OF cost_model ON accounts
+WHEN NEW.cost_model IS NOT OLD.cost_model
+BEGIN
+  SELECT RAISE(ABORT, 'cost_model cannot be changed after the account is created');
+END;
+`)
+
+  // Fee rate the engine applied to each fill; older and manual fills keep NULL.
+  const tradeColumns = sqlite.prepare('PRAGMA table_info(trades)').all() as { name: string }[]
+  if (!tradeColumns.some((c) => c.name === 'fee_rate')) {
+    sqlite.exec('ALTER TABLE trades ADD COLUMN fee_rate REAL')
+  }
 }

@@ -87,6 +87,19 @@ Parametri fissi del pilota: modello `gemini-3.5-flash-lite`, base URL
 mercati BTC ETH SOL BNB XRP DOGE del prompt originale, solo perpetual MARKET.
 Per la prova da 24 h (autorizzazione separata): `--cycles 288 --max-attempts 300 --timeout-min 1460`.
 
+**Modello economico (`--cost-model`, default `original`).** Fissato alla creazione del conto e poi
+immutabile, quindi una prova non mescola mai due modelli:
+
+- `original`: regole dell'autore (commissione taker 0,07%, interessi, monitor e prezzi originali);
+- `hyperliquid`: per ora cambia **solo** la commissione taker perpetual (0,045%, livello base di
+  Hyperliquid senza sconti: un'ipotesi esplicita). Funding, liquidazioni, mark price, spread e
+  slippage non sono ancora modellati.
+
+Il launcher invia il modello alla creazione del conto e si ferma se l'app risponde con un altro
+modello. Fuori dal launcher lo stesso valore si può dare con la variabile `ALPHA_COST_MODEL` (usata
+quando la richiesta di creazione non indica `cost_model`). I conti dei database precedenti restano
+`original`.
+
 **Limite rigido dei tentativi verso Gemini (`ai-budget.mjs`).** `--max-attempts` è solo un controllo a
 posteriori. Il limite garantito si ottiene caricando il preload, che rifiuta senza inviarla ogni richiesta
 oltre `AI_BUDGET_MAX`, retry compresi (vale per il processo dell'app; il launcher non lo riavvia):
@@ -173,6 +186,8 @@ Contiene:
 
 - capitale iniziale e finale;
 - P&L lordo, netto, realizzato e non realizzato, in USDC e %;
+- `cost_model`: modello economico del conto, tasso taker applicato e tassi registrati nei fill, con
+  la nota di cosa il modello copre;
 - commissioni e interessi addebitati, e a parte quelli maturati ma non addebitati;
 - `if_closed`, separato dal risultato registrato: commissione stimata per chiudere ogni posizione
   aperta al prezzo finale (commissione taker del motore), interessi maturati non addebitati, P&L netto

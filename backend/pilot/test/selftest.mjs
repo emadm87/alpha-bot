@@ -246,6 +246,15 @@ await step('launcher: senza --authorized non avvia nulla', () => {
   assert.equal(fs.existsSync(dir), false)
 })
 
+await step('launcher: modello economico nel piano; valore non valido rifiutato', () => {
+  const plan = (extra) => JSON.parse(runPilot(path.join(tmp, 'no-auth'), 'complete', extra).stdout).plan
+  assert.equal(plan([]).cost_model, 'original')
+  assert.equal(plan(['--cost-model', 'hyperliquid']).cost_model, 'hyperliquid')
+  const bad = runPilot(path.join(tmp, 'no-auth'), 'complete', ['--cost-model', 'binance'])
+  assert.equal(bad.status, 64, bad.stderr)
+  assert.equal(fs.existsSync(path.join(tmp, 'no-auth')), false)
+})
+
 const fakeArgs = (port) => ['--authorized', '--test-backend', path.join(here, 'fake-backend.mjs'), '--poll-ms', '300', '--port', String(port), '--proxy-shim', 'off', '--startup-ms', '10000']
 await step('launcher: pilota completo (12 cicli) e arresto', async () => {
   const dir = path.join(tmp, 'complete')
@@ -257,6 +266,16 @@ await step('launcher: pilota completo (12 cicli) e arresto', async () => {
   // Windows non ha SIGTERM: l'app viene terminata con taskkill e non scrive la riga di chiusura
   if (!isWindows) assert.match(fs.readFileSync(path.join(dir, 'backend.log'), 'utf8'), /Received SIGTERM/)
   assert.ok(await portFree(5791), 'porta ancora occupata: processo dell app rimasto attivo')
+})
+
+await step('launcher: --cost-model hyperliquid inviato alla creazione del conto e verificato', async () => {
+  const dir = path.join(tmp, 'complete-hl')
+  const r = runPilot(dir, 'complete', [...fakeArgs(5796), '--cost-model', 'hyperliquid'])
+  assert.equal(r.status, 0, r.stdout + r.stderr)
+  const meta = JSON.parse(fs.readFileSync(path.join(dir, 'run-meta.json'), 'utf8'))
+  assert.equal(meta.plan.cost_model, 'hyperliquid')
+  assert.equal(meta.status, 'complete')
+  assert.ok(await portFree(5796), 'porta ancora occupata')
 })
 
 await step('launcher: errore di avvio -> nessun conto creato, nessuna chiamata', () => {
