@@ -427,7 +427,10 @@ export const taskScheduler = new TaskScheduler()
 // ---------------------------------------------------------------- convenience
 
 export const startScheduler = () => taskScheduler.start()
-export const stopScheduler = () => taskScheduler.shutdown()
+export const stopScheduler = () => {
+  cancelAutoTradingRetry()
+  taskScheduler.shutdown()
+}
 
 export const addAccountSnapshotJob = (accountId: number, intervalSeconds = 10) =>
   taskScheduler.addAccountSnapshotTask(accountId, intervalSeconds)
@@ -444,6 +447,16 @@ export function startMarginMonitor(intervalSeconds = 5): void {
 export function setupMarketTasks(): void {
   // Crypto markets run 24/7, no specific market open/close times needed
   logger.info('Crypto markets run 24/7 - no market hours tasks needed')
+}
+
+/** Symbols the readiness check could not price. */
+class MarketDataNotReadyError extends Error {
+  constructor(
+    readonly missing: string[],
+    readonly total: number,
+  ) {
+    super(`Market data not ready for symbols: ${missing.join(', ')}`)
+  }
 }
 
 /** Prefetch required market data before enabling trading tasks. */
@@ -470,16 +483,65 @@ async function ensureMarketDataReady(): Promise<void> {
 
   if (missingSymbols.length > 0) {
     const unique = [...new Set(missingSymbols)].sort()
-    const err = new Error(
-      `Market data not ready for symbols: ${unique.join(', ')}`,
-    )
+    const err = new MarketDataNotReadyError(unique, AI_TRADING_SYMBOLS.length)
     logger.error(`Market data readiness check failed: ${err.message}`)
     throw err
   }
 }
 
+/**
+ * When the readiness check fails and no AI job exists yet (at startup), the
+ * job is not scheduled with incomplete prices: the start is retried after
+ * these delays (seconds; the last one repeats), at most
+ * AI_START_MAX_ATTEMPTS times. Every symbol missing looks like an outage and
+ * is retried up to that limit; the same symbols missing while the others are
+ * priced looks permanent and stops after AI_START_MAX_PARTIAL attempts.
+ * Giving up is logged as an error; the next account save or a restart starts
+ * a new series. stopScheduler cancels a pending retry.
+ */
+export const AI_START_RETRY_DELAYS = [15, 30, 60, 120, 300]
+export const AI_START_MAX_ATTEMPTS = 12
+export const AI_START_MAX_PARTIAL = 3
+
+export interface AutoTradingStatus {
+  state: 'idle' | 'scheduled' | 'retrying' | 'failed'
+  /** Attempts of the current series. */
+  attempts: number
+  lastError: string | null
+  nextRetryAt: string | null
+}
+
+let autoTradingStatus: AutoTradingStatus = { state: 'idle', attempts: 0, lastError: null, nextRetryAt: null }
+let startRetryTimer: NodeJS.Timeout | null = null
+/** Bumped by every reset and stop: an attempt of an older series is dropped. */
+let startSeries = 0
+let partialMissing = { symbols: '', count: 0 }
+
+export function getAutoTradingStatus(): AutoTradingStatus {
+  return { ...autoTradingStatus }
+}
+
+/** Cancels a pending start retry and drops any attempt still running. */
+function cancelAutoTradingRetry(): void {
+  startSeries++
+  if (startRetryTimer) clearTimeout(startRetryTimer)
+  startRetryTimer = null
+  if (autoTradingStatus.state === 'retrying') {
+    autoTradingStatus = { ...autoTradingStatus, state: 'idle', nextRetryAt: null }
+  }
+}
+
 /** Reset the auto trading job after account configuration changes. */
 export async function resetAutoTradingJob(): Promise<void> {
+  cancelAutoTradingRetry()
+  autoTradingStatus = { state: 'idle', attempts: 0, lastError: null, nextRetryAt: null }
+  partialMissing = { symbols: '', count: 0 }
+  await startAutoTradingJob(startSeries)
+}
+
+async function startAutoTradingJob(series: number): Promise<void> {
+  const attempts = autoTradingStatus.attempts + 1
+  autoTradingStatus = { ...autoTradingStatus, attempts, nextRetryAt: null }
   try {
     const { AI_TRADE_JOB_ID, placeAIDrivenCryptoOrder } = await import(
       './tradingCommands.js'
@@ -488,7 +550,21 @@ export async function resetAutoTradingJob(): Promise<void> {
     const AI_TRADE_INTERVAL_SECONDS = 300 // 5 minutes
 
     // Ensure market data is ready before scheduling trading tasks
-    await ensureMarketDataReady()
+    try {
+      await ensureMarketDataReady()
+    } catch (e) {
+      if (series !== startSeries) return // reset or stopped meanwhile
+      if (!(e instanceof MarketDataNotReadyError)) throw e
+      if (taskScheduler.getJob(AI_TRADE_JOB_ID)) {
+        // A job already runs (account saved later on): keep it, as before
+        logger.warning(`Auto trading job kept unchanged: ${e.message}`)
+        autoTradingStatus = { ...autoTradingStatus, state: 'scheduled', lastError: e.message }
+        return
+      }
+      planStartRetry(series, attempts, e)
+      return
+    }
+    if (series !== startSeries) return
 
     if (!taskScheduler.isRunning()) {
       taskScheduler.start()
@@ -505,6 +581,7 @@ export async function resetAutoTradingJob(): Promise<void> {
       AI_TRADE_INTERVAL_SECONDS,
       AI_TRADE_JOB_ID,
     )
+    autoTradingStatus = { state: 'scheduled', attempts, lastError: null, nextRetryAt: null }
 
     // Trigger one immediate execution in the background so API calls don't block
     void (async () => {
@@ -522,5 +599,40 @@ export async function resetAutoTradingJob(): Promise<void> {
     )
   } catch (e) {
     logger.error(`Failed to reset auto trading job: ${e}`)
+    autoTradingStatus = { ...autoTradingStatus, state: 'failed', lastError: String(e) }
   }
+}
+
+function planStartRetry(series: number, attempts: number, e: MarketDataNotReadyError): void {
+  const partial = e.missing.length < e.total
+  const symbols = e.missing.join(',')
+  partialMissing = partial
+    ? { symbols, count: partialMissing.symbols === symbols ? partialMissing.count + 1 : 1 }
+    : { symbols: '', count: 0 }
+
+  if (attempts >= AI_START_MAX_ATTEMPTS || partialMissing.count >= AI_START_MAX_PARTIAL) {
+    const why = partialMissing.count >= AI_START_MAX_PARTIAL
+      ? `the same symbols had no price ${partialMissing.count} times in a row`
+      : `${attempts} attempts`
+    logger.error(
+      `Failed to reset auto trading job: AI trading NOT scheduled after ${why} (${e.message}). ` +
+        'No retry left: save an account or restart the app to try again.',
+    )
+    autoTradingStatus = { state: 'failed', attempts, lastError: e.message, nextRetryAt: null }
+    return
+  }
+
+  const delay = AI_START_RETRY_DELAYS[Math.min(attempts - 1, AI_START_RETRY_DELAYS.length - 1)]!
+  logger.warning(
+    `AI trading job not scheduled yet: ${e.message}. Retry ${attempts + 1}/${AI_START_MAX_ATTEMPTS} in ${delay}s`,
+  )
+  autoTradingStatus = {
+    state: 'retrying', attempts, lastError: e.message,
+    nextRetryAt: new Date(Date.now() + delay * 1000).toISOString(),
+  }
+  startRetryTimer = setTimeout(() => {
+    startRetryTimer = null
+    void startAutoTradingJob(series)
+  }, delay * 1000)
+  startRetryTimer.unref?.()
 }

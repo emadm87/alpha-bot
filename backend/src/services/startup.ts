@@ -1,5 +1,6 @@
 /** Application startup initialization service. Port of `services/startup.py`. */
 import {
+  getAutoTradingStatus,
   resetAutoTradingJob,
   setupMarketTasks,
   startMarginMonitor,
@@ -28,24 +29,17 @@ export async function initializeServices(): Promise<void> {
     logger.info('Market scheduled tasks have been set up')
 
     // Start automatic crypto trading via reset, which also verifies market
-    // data readiness and uses the correct job ID.
+    // data readiness and uses the correct job ID. If prices are not ready it
+    // retries on its own (bounded, see resetAutoTradingJob); the original
+    // fallback to random spot orders is never used for the AI accounts.
     try {
       await resetAutoTradingJob()
       logger.info(
-        `Automatic cryptocurrency trading task scheduled via reset (5-minute interval). ` +
+        `Automatic cryptocurrency trading: ${JSON.stringify(getAutoTradingStatus())}. ` +
           `Jobs: ${JSON.stringify(taskScheduler.getJobInfo())}`,
       )
     } catch (e) {
       logger.error(`Failed to schedule AI auto trading task: ${e}`)
-      // Fall back to random trading so the demo stays functional
-      try {
-        scheduleAutoTrading({ intervalSeconds: 300, useAi: false })
-        logger.warning(
-          `Falling back to random trading schedule. Jobs: ${JSON.stringify(taskScheduler.getJobInfo())}`,
-        )
-      } catch (e2) {
-        logger.error(`Failed to schedule fallback random trading task: ${e2}`)
-      }
     }
 
     // Price cache cleanup task (every 2 minutes)
