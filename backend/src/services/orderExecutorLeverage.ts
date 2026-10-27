@@ -102,7 +102,7 @@ export async function placeAndExecuteCrypto(params: {
     name,
     orderType,
     price,
-    quantity,
+    quantity: requestedQuantity,
     leverage = 1,
     orderNo = randomUUID().replace(/-/g, '').slice(0, 16),
   } = params
@@ -115,7 +115,7 @@ export async function placeAndExecuteCrypto(params: {
   // A close below the minimum is checked against the position inside the
   // transaction: only closing all of a smaller position is allowed.
   const isClose = side === 'BUY' || side === 'SELL'
-  if (quantity <= 0 || (!isClose && quantity < CRYPTO_MIN_ORDER_QUANTITY)) {
+  if (requestedQuantity <= 0 || (!isClose && requestedQuantity < CRYPTO_MIN_ORDER_QUANTITY)) {
     throw new Error(`Quantity must be >= ${CRYPTO_MIN_ORDER_QUANTITY}`)
   }
 
@@ -125,15 +125,45 @@ export async function placeAndExecuteCrypto(params: {
       ? price
       : await getLastPrice(symbol, 'CRYPTO')
 
+  // The cost model never changes, so the caller's row is enough to read it
+  const hyperliquidModel = account.costModel === 'hyperliquid'
+  const held = hyperliquidModel
+    ? db.select().from(positions)
+      .where(and(eq(positions.accountId, account.id), eq(positions.symbol, symbol), eq(positions.market, 'CRYPTO'))).get()
+    : undefined
+
+  // 'hyperliquid' model (Task 006I-4): the size is rounded down to the market's
+  // lot (szDecimals from meta) and an order worth less than 10 USD is refused
+  // (MinTradeNtl), as the exchange would. Exempt: a close of the whole
+  // position (third-party docs report full reduce-only closes as allowed below
+  // 10 USD; the official page lists no exception) and liquidations, which the
+  // exchange runs itself. Without valid szDecimals opens and partial closes
+  // are refused; full closes and liquidations stay possible.
+  let quantity = requestedQuantity
+  if (hyperliquidModel) {
+    const fullClose = isClose && !!held?.side && held.quantity > 0 && Math.abs(requestedQuantity - held.quantity) <= 1e-12
+    const liquidation = orderNo.startsWith('LIQ-')
+    if (!fullClose && !liquidation) {
+      const { floorToLot, hyperliquidSizeDecimals, HL_MIN_ORDER_NOTIONAL } = await import('./hyperliquidMarket.js')
+      const rule = await hyperliquidSizeDecimals(symbol)
+      if ('error' in rule) throw new Error(`Hyperliquid order refused: ${rule.error}`)
+      quantity = floorToLot(requestedQuantity, rule.szDecimals)
+      if (quantity <= 0) {
+        throw new Error(`Hyperliquid order refused: size ${requestedQuantity} ${symbol} below the lot ${10 ** -rule.szDecimals} (szDecimals ${rule.szDecimals})`)
+      }
+      const value = quantity * execPrice
+      if (value < HL_MIN_ORDER_NOTIONAL) {
+        throw new Error(`Hyperliquid order refused (MinTradeNtl): ${quantity} ${symbol} x ${execPrice} = ${value.toFixed(4)} USD, below the minimum of ${HL_MIN_ORDER_NOTIONAL} USD`)
+      }
+    }
+  }
+
   const notional = execPrice * quantity
 
   // 'hyperliquid' model: an open above the market's maximum leverage (the
   // margin tier of the resulting position, from Hyperliquid's meta) is
-  // refused, as the exchange would. The cost model never changes, so the
-  // caller's row is enough to read it.
-  if (account.costModel === 'hyperliquid' && (side === 'LONG' || side === 'SHORT')) {
-    const held = db.select().from(positions)
-      .where(and(eq(positions.accountId, account.id), eq(positions.symbol, symbol), eq(positions.market, 'CRYPTO'))).get()
+  // refused, as the exchange would.
+  if (hyperliquidModel && (side === 'LONG' || side === 'SHORT')) {
     const { hyperliquidLeverageIssue } = await import('./hyperliquidMarket.js')
     const issue = await hyperliquidLeverageIssue(symbol, leverage, notional + (held?.side ? held.quantity * execPrice : 0))
     if (issue) throw new Error(issue)
@@ -152,7 +182,9 @@ export async function placeAndExecuteCrypto(params: {
         side,
         orderType,
         price: execPrice,
-        quantity,
+        // requested size; filledQuantity below is the size executed (rounded
+        // to the lot in the 'hyperliquid' model, the same in 'original')
+        quantity: requestedQuantity,
         leverage,
         filledQuantity: 0,
         status: 'PENDING',

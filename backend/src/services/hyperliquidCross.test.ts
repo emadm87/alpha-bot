@@ -120,7 +120,8 @@ test('1. leverage limits per market from meta; original unchanged; no meta, no o
   resetMarginTables()
   hyperliquidStub.failMeta = true
   const id2 = newAccount()
-  await assert.rejects(fill(id2, 'ETH', 'LONG', 0.1, 2, 2400), /Cannot verify the Hyperliquid leverage limit for ETH/)
+  // (the size rule of Task 006I-4 is checked first and needs the same meta)
+  await assert.rejects(fill(id2, 'ETH', 'LONG', 0.1, 2, 2400), /Hyperliquid size rules for ETH unavailable: meta not received/)
   await fill(og, 'ETH', 'LONG', 0.1, 2, 2400) // original needs no meta
 })
 

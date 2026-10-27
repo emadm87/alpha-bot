@@ -1,8 +1,10 @@
 /**
- * Hyperliquid market rules used by the 'hyperliquid' cost model (Task
- * 006I-3): margin tables and maximum leverage from the public `meta` request,
- * kept for TABLES_MAX_AGE_MS, and the leverage check on opens.
- * Docs: trading/margin-tiers, trading/margining.
+ * Hyperliquid market rules used by the 'hyperliquid' cost model: margin
+ * tables and maximum leverage from the public `meta` request, kept for
+ * TABLES_MAX_AGE_MS, and the leverage check on opens (Task 006I-3); order size
+ * precision and minimum order value (Task 006I-4).
+ * Docs: trading/margin-tiers, trading/margining, for-developers/api/tick-and-lot-size,
+ * for-developers/api/error-responses.
  */
 import { getMetaFromHyperliquid } from './hyperliquid.js'
 import { maintenanceSchedule } from './hyperliquidMargin.js'
@@ -63,4 +65,34 @@ export async function hyperliquidLeverageIssue(symbol: string, leverage: number,
   for (const tier of schedule) if (notional >= tier.lowerBound) max = tier.maxLeverage
   max = Math.min(max, asset.maxLeverage)
   return leverage > max ? `Leverage ${leverage}x above the Hyperliquid maximum of ${max}x for ${symbol}` : null
+}
+
+/** Minimum order value of a perpetual order (error MinTradeNtl, "Order must have minimum value of $10"). */
+export const HL_MIN_ORDER_NOTIONAL = 10
+
+/**
+ * Size decimals of a listed perpetual from the meta response, or why they are
+ * unknown. Nothing is assumed when the meta is missing or the value invalid.
+ */
+export async function hyperliquidSizeDecimals(symbol: string): Promise<{ szDecimals: number } | { error: string }> {
+  const t = await loadMarginTables()
+  if (!t) return { error: `Hyperliquid size rules for ${symbol} unavailable: meta not received` }
+  const asset = t.assets.get(symbol)
+  if (!asset || asset.delisted) return { error: `${symbol} is not a listed Hyperliquid perpetual` }
+  if (asset.szDecimals === null) return { error: `Hyperliquid szDecimals for ${symbol} missing or invalid in meta` }
+  return { szDecimals: asset.szDecimals }
+}
+
+/**
+ * Size rounded DOWN to the lot 10^-szDecimals, so an order never exceeds the
+ * requested exposure. The size is scaled to whole lots with a tolerance for
+ * binary representation (0.00002 * 1e5 = 2.0000000000000004), then rebuilt
+ * from the integer number of lots.
+ */
+export function floorToLot(size: number, szDecimals: number): number {
+  const scale = 10 ** szDecimals
+  const lots = size * scale
+  const nearest = Math.round(lots)
+  const whole = Math.abs(lots - nearest) <= 1e-9 * Math.max(1, nearest) ? nearest : Math.floor(lots)
+  return Number((whole / scale).toFixed(szDecimals))
 }

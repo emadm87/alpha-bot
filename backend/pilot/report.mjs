@@ -31,8 +31,11 @@ const MODEL_NOTES = {
     'nessuno sconto), il funding orario (tasso realizzato da fundingHistory x oracle price catturato all\'ora x quantita; ' +
     'nessun interesse dell\'originale), il mark price per P&L non realizzato, equity e margine, il cross margin con le fasce ' +
     'ufficiali (liquidazione quando il valore del conto a mark scende sotto il margine di mantenimento, anche 1x) e la leva ' +
-    'massima per mercato. NON ancora modellati: esecuzione al bid/ask e slippage (gli ordini, liquidazioni comprese, si ' +
-    'eseguono al mid), precisione degli ordini, backstop della vault di liquidazione',
+    'massima per mercato, la precisione degli ordini (quantita arrotondata per difetto al lotto 10^-szDecimals del meta) e il ' +
+    'valore minimo di 10 USD per ordine (MinTradeNtl; esenti la chiusura dell\'intera posizione, eccezione riportata da fonti ' +
+    'terze e non dalla pagina ufficiale, e le liquidazioni). NON ancora modellati: esecuzione al bid/ask e slippage (gli ' +
+    'ordini, liquidazioni comprese, si eseguono al mid), precisione dei prezzi (5 cifre significative: irrilevante finche ' +
+    'si esegue al prezzo di mercato), backstop della vault di liquidazione',
 }
 
 export function buildReport({ dbFile, traceFile, accountId: requested, prices, at, priceIn, priceOut }) {
@@ -229,6 +232,10 @@ for (const x of series.filter((x) => x.ts)) {
 // --- decisioni ------------------------------------------------------------------------
 const ops = decisions.reduce((m, d) => { const k = `${d.operation || '(vuota)'}${d.executed === 'true' ? '' : ' non eseguita'}`; m[k] = (m[k] ?? 0) + 1; return m }, {})
 const outcomes = trace.filter((e) => e.event === 'outcome').reduce((m, o) => ((m[o.status] = (m[o.status] ?? 0) + 1), m), {})
+// Modello hyperliquid (006I-4): quantita richiesta e eseguita per ordine; gli ordini rifiutati non
+// lasciano righe nel database e si leggono dalla traccia (esito execution_failed)
+const sizedOrders = orders.filter((o) => o.status === 'FILLED' && Math.abs(o.quantity - o.filled_quantity) > 1e-12)
+const refusedOrders = trace.filter((e) => e.event === 'outcome' && e.status === 'execution_failed' && /Hyperliquid order refused/.test(e.detail ?? ''))
 const apiErrors = trace.filter((e) => e.event === 'api_error').length
 const usage = trace.filter((e) => e.event === 'response').reduce((u, e) => {
   const x = e.response?.usage ?? {}
@@ -268,6 +275,18 @@ return {
     fees: r(fees), interest_charged: r(interest), funding_net: r(fundingNet, 6), net_usdc: r(net), net_pct: pct(net),
     accrued_interest_not_charged: r(accrued, 6), net_after_accrued_usdc: r(net - accrued),
   },
+  // Precisione e minimi degli ordini Hyperliquid (006I-4); assente nei report del modello originale
+  ...(costModel === 'hyperliquid'
+    ? {
+        order_sizes: {
+          rule: 'quantita arrotondata per difetto al lotto 10^-szDecimals; ordine sotto 10 USD rifiutato (MinTradeNtl), ' +
+            'esenti chiusura dell\'intera posizione e liquidazioni; senza szDecimals valido rifiutate aperture e chiusure parziali',
+          filled_orders: orders.filter((o) => o.status === 'FILLED').length,
+          rounded: sizedOrders.map((o) => ({ order_no: o.order_no, symbol: o.symbol, side: o.side, requested: o.quantity, executed: o.filled_quantity })),
+          refused: refusedOrders.map((e) => ({ at: e.ts, detail: e.detail })),
+        },
+      }
+    : {}),
   // Margine e liquidazioni: la regola dell'autore (original) o il cross margin Hyperliquid a mark.
   margin: {
     rule: costModel === 'hyperliquid'

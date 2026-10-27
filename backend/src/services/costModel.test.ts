@@ -39,7 +39,7 @@ globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
 }) as typeof fetch
 
 const { db, ensureSchema, rawDb } = await import('../db/client.js')
-const { accounts, positions, trades, users, HL_PERP_TAKER_FEE_RATE, CRYPTO_TAKER_FEE_RATE, takerFeeRate } = await import('../db/schema.js')
+const { accounts, orders, positions, trades, users, HL_PERP_TAKER_FEE_RATE, CRYPTO_TAKER_FEE_RATE, takerFeeRate } = await import('../db/schema.js')
 const { and, eq } = await import('drizzle-orm')
 const { cachePrice } = await import('./priceCache.js')
 const { placeAndExecuteCrypto } = await import('./orderExecutorLeverage.js')
@@ -254,13 +254,24 @@ test('7. AI path: same prompt, sizing and decision under both models; only the f
   const og = await run('original')
   const hl = await run('hyperliquid')
   assert.equal(hl.prompt, og.prompt, 'identical prompt')
+  // same decision and sizing: both orders ask for 500 / 2400 = 0.208333 ETH
+  const ordered = (id: number) => db.select().from(orders).where(eq(orders.accountId, id)).get()!
+  assert.equal(ordered(og.id).quantity, 0.208333)
+  assert.equal(ordered(hl.id).quantity, 0.208333)
   assert.deepEqual(
-    [hl.eth.quantity, hl.eth.leverage, hl.eth.side, hl.eth.avgCost, hl.eth.margin],
-    [og.eth.quantity, og.eth.leverage, og.eth.side, og.eth.avgCost, og.eth.margin],
-    'identical position',
+    [hl.eth.leverage, hl.eth.side, hl.eth.avgCost],
+    [og.eth.leverage, og.eth.side, og.eth.avgCost],
+    'same leverage, side and price',
   )
-  assert.equal(og.eth.quantity, 0.208333) // 500 / 2400
+  // the original executes the size as asked; hyperliquid rounds it down to the
+  // ETH lot (szDecimals 4, Task 006I-4), and margin and fee follow the size executed
+  assert.equal(og.eth.quantity, 0.208333)
+  assert.equal(hl.eth.quantity, 0.2083)
+  assert.equal(ordered(hl.id).filledQuantity, 0.2083)
+  near(og.eth.margin!, 0.208333 * 2400 / 2, 'original margin', 1e-9)
+  near(hl.eth.margin!, 0.2083 * 2400 / 2, 'hyperliquid margin', 1e-9)
   near(og.fill.commission, 0.208333 * 2400 * OG, 'original fee', 1e-12)
-  near(hl.fill.commission, 0.208333 * 2400 * HL, 'hyperliquid fee', 1e-12)
-  near(account(og.id).currentCash - account(hl.id).currentCash, -(OG - HL) * 0.208333 * 2400, 'cash gap = fee gap', 1e-9)
+  near(hl.fill.commission, 0.2083 * 2400 * HL, 'hyperliquid fee', 1e-12)
+  near(account(og.id).currentCash, 1000 - 0.208333 * 2400 / 2 - 0.208333 * 2400 * OG, 'original cash', 1e-9)
+  near(account(hl.id).currentCash, 1000 - 0.2083 * 2400 / 2 - 0.2083 * 2400 * HL, 'hyperliquid cash', 1e-9)
 })

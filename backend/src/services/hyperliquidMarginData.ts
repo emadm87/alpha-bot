@@ -38,6 +38,11 @@ export interface AssetMeta {
   maxLeverage: number
   marginTableId: number
   delisted: boolean
+  /**
+   * Decimals of the order size (lot 10^-szDecimals), or null when the meta
+   * entry has none or an invalid one (Task 006I-4: no value is assumed).
+   */
+  szDecimals: number | null
 }
 
 export interface MarginTables {
@@ -47,7 +52,7 @@ export interface MarginTables {
   tables: Map<number, MarginTier[]>
   /** Ids of the tables rejected while parsing, with the reason. */
   rejected: Map<number, string>
-  /** Tables rejected while parsing, with the reason. */
+  /** Tables rejected while parsing, and assets without valid szDecimals, with the reason. */
   issues: string[]
 }
 
@@ -112,17 +117,22 @@ export function parseMetaResponse(raw: unknown, receivedAt: number): MarginTable
   }
   if (!Number.isFinite(receivedAt)) return { error: 'receipt time missing' }
   const assets = new Map<string, AssetMeta>()
+  const sizeIssues: string[] = []
   for (const u of meta.universe) {
     if (!isObject(u) || typeof u.name !== 'string') return { error: 'universe entry without a name' }
     if (assets.has(u.name)) return { error: `duplicate universe entry ${u.name}` }
     const maxLeverage = num(u.maxLeverage)
     const marginTableId = num(u.marginTableId)
     if (maxLeverage === null || marginTableId === null) return { error: `${u.name}: maxLeverage or marginTableId missing` }
-    assets.set(u.name, { coin: u.name, maxLeverage, marginTableId, delisted: u.isDelisted === true })
+    // perp prices keep at most 6 - szDecimals decimals (tick-and-lot-size), so 0..6
+    const szDecimals = num(u.szDecimals)
+    const validSz = szDecimals !== null && Number.isInteger(szDecimals) && szDecimals >= 0 && szDecimals <= 6
+    assets.set(u.name, { coin: u.name, maxLeverage, marginTableId, delisted: u.isDelisted === true, szDecimals: validSz ? szDecimals : null })
+    if (!validSz) sizeIssues.push(`${u.name}: szDecimals ${JSON.stringify(u.szDecimals)} missing or invalid`)
   }
   const tables = new Map<number, MarginTier[]>()
   const rejected = new Map<number, string>()
-  const issues: string[] = []
+  const issues: string[] = [...sizeIssues]
   for (const entry of meta.marginTables) {
     const id = Array.isArray(entry) ? num(entry[0]) : null
     if (id === null) {

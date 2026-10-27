@@ -361,6 +361,7 @@ export async function placeAIDrivenCryptoOrder(): Promise<void> {
 
         let orderId: number | null = null
         let executed = false
+        let filled = ''
         try {
           const order = await placeAndExecuteCrypto({
             account,
@@ -374,8 +375,10 @@ export async function placeAIDrivenCryptoOrder(): Promise<void> {
           })
           orderId = order.id
           executed = true
+          // 'hyperliquid' model: the size executed can be rounded down to the lot
+          filled = order.filledQuantity !== quantity ? ` filled=${order.filledQuantity}` : ''
           logger.info(
-            `✅ AI order executed: account=${account.name} ${operation.toUpperCase()} ${direction.toUpperCase()} ${side} ${symbol} ${order.orderNo} quantity=${quantity} leverage=${leverage}x reason='${reason}'`,
+            `✅ AI order executed: account=${account.name} ${operation.toUpperCase()} ${direction.toUpperCase()} ${side} ${symbol} ${order.orderNo} quantity=${quantity}${filled} leverage=${leverage}x reason='${reason}'`,
           )
         } catch (e) {
           logger.error(`Failed to execute order for ${account.name}: ${e}`)
@@ -383,7 +386,7 @@ export async function placeAIDrivenCryptoOrder(): Promise<void> {
           outcome('execution_failed', `${side} ${symbol} quantity=${quantity} leverage=${leverage}x: ${e}`)
         }
         if (executed) {
-          outcome('executed', `${side} ${symbol} quantity=${quantity} leverage=${leverage}x`, orderId)
+          outcome('executed', `${side} ${symbol} quantity=${quantity}${filled} leverage=${leverage}x`, orderId)
         }
 
         saveAIDecision(account, decision, portfolio, executed, orderId)
