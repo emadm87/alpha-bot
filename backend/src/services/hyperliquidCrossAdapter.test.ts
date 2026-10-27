@@ -275,7 +275,7 @@ test('12. invalid or old margin tables: not evaluable', async () => {
   if (b.status === 'not_evaluable') assert.ok(b.reasons.includes('BTC unsupported'))
 })
 
-test('13. accrued interest and funding are reported as not included', async () => {
+test('13. accrued interest is reported as not included; settled funding is in cash', async () => {
   const id = newAccount()
   await open(id, 'BTC', 'LONG', 1500, 3)
   rawDb.prepare('UPDATE positions SET last_interest_time = ? WHERE account_id = ?').run(utcNow(new Date(Date.now() - 10 * 3_600_000)), id)
@@ -285,7 +285,7 @@ test('13. accrued interest and funding are reported as not included', async () =
   const r = ready(adapt(id, { BTC: 100 }, { accruedInterest: { BTC: accrued } }))
   near(r.collateral.total, 998.95, 'collateral unchanged by accrued interest')
   assert.ok(r.notes.some((n) => n.startsWith('accrued interest not included in collateral: 0.12')))
-  assert.ok(r.notes.some((n) => n.startsWith('funding is not modelled')))
+  assert.ok(r.notes.some((n) => n.startsWith('funding already settled is part of cash')))
   const without = ready(adapt(id, { BTC: 100 }))
   assert.ok(without.notes.includes('accrued interest not provided: collateral excludes any interest still to be charged'))
 })

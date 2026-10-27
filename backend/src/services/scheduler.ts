@@ -12,6 +12,7 @@ import { db } from '../db/client.js'
 import {
   accounts,
   cryptoPrices,
+  liquidationEvents,
   positions as positionsTable,
   type Account,
   type Position,
@@ -30,6 +31,11 @@ interface Job {
   funcName: string
   nextRunTime: number
 }
+
+/** Accounts whose Hyperliquid margin check is running: never two at once. */
+const hyperliquidChecks = new Set<number>()
+/** Last reason an account could not be evaluated, to log each change once. */
+const hyperliquidSkips = new Map<number, string>()
 
 /** Unified task scheduler. */
 export class TaskScheduler {
@@ -288,7 +294,9 @@ export class TaskScheduler {
 
   /**
    * Check margin levels for all accounts with leveraged positions and force
-   * close positions if margin falls below the maintenance level.
+   * close positions if margin falls below the maintenance level: the
+   * author's rule for 'original' accounts, Hyperliquid's cross margin rule
+   * for 'hyperliquid' accounts (checkHyperliquidMargin).
    */
   private async checkMarginLevels(): Promise<void> {
     try {
@@ -301,15 +309,14 @@ export class TaskScheduler {
         .all()
         .map((r) => r.accountId)
 
-      if (leveragedAccountIds.length === 0) return
-
-      const accountsWithPositions = db
+      const accountsWithPositions = leveragedAccountIds.length === 0 ? [] : db
         .select()
         .from(accounts)
         .where(inArray(accounts.id, leveragedAccountIds))
         .all()
 
       for (const account of accountsWithPositions) {
+        if (account.costModel === 'hyperliquid') continue // cross margin rule below
         try {
           await this.checkAccountMargin(account)
         } catch (e) {
@@ -320,6 +327,105 @@ export class TaskScheduler {
       }
     } catch (e) {
       logger.error(`Error in margin monitoring: ${e}`)
+    }
+
+    try {
+      // every open perpetual of a hyperliquid account, 1x included
+      const ids = db
+        .selectDistinct({ accountId: positionsTable.accountId })
+        .from(positionsTable)
+        .innerJoin(accounts, eq(accounts.id, positionsTable.accountId))
+        .where(and(gt(positionsTable.quantity, 0), eq(accounts.costModel, 'hyperliquid')))
+        .all()
+        .map((r) => r.accountId)
+      for (const accountId of ids) {
+        try {
+          await this.checkHyperliquidMargin(accountId)
+        } catch (e) {
+          logger.error(`Error checking Hyperliquid margin for account ${accountId}: ${e}`)
+        }
+      }
+    } catch (e) {
+      logger.error(`Error in Hyperliquid margin monitoring: ${e}`)
+    }
+  }
+
+
+  /**
+   * Hyperliquid cross margin (docs: trading/liquidations, margining,
+   * margin-tiers): account value = collateral (cash + posted margin, so after
+   * every fee and settled funding) + unrealized P&L at mark price; the account
+   * is liquidated when it falls below the sum of the positions' maintenance
+   * margins from the official tiers. Without a valid, fresh mark price or
+   * margin table for every position nothing is decided.
+   */
+  private async checkHyperliquidMargin(accountId: number): Promise<void> {
+    if (hyperliquidChecks.has(accountId)) return
+    hyperliquidChecks.add(accountId)
+    try {
+      const { getLastPrice } = await import('./marketData.js')
+      const { loadMarginTables } = await import('./hyperliquidMarket.js')
+      const { marksFromAssetContexts } = await import('./hyperliquidMarginData.js')
+      const { crossInputFromAccount } = await import('./hyperliquidCrossAdapter.js')
+
+      const openRows = () =>
+        db.select().from(positionsTable)
+          .where(and(eq(positionsTable.accountId, accountId), gt(positionsTable.quantity, 0))).all()
+      const symbols = [...new Set(openRows().map((p) => p.symbol))]
+      // refreshes the asset contexts (mark prices) when the price cache expired
+      for (const symbol of symbols) await getLastPrice(symbol, 'CRYPTO').catch(() => null)
+      const tables = await loadMarginTables()
+
+      // decided on the rows as they are now, after the awaits above
+      const account = db.select().from(accounts).where(eq(accounts.id, accountId)).get()
+      const rows = openRows()
+      if (!account || rows.length === 0) return
+      const skip = (reason: string) => {
+        if (hyperliquidSkips.get(accountId) !== reason) {
+          hyperliquidSkips.set(accountId, reason)
+          logger.warning(`Hyperliquid margin of account ${account.name} not evaluated, no liquidation: ${reason}`)
+        }
+      }
+      if (!tables) return skip('margin tables unavailable')
+      const result = crossInputFromAccount({
+        account, positions: rows, marks: marksFromAssetContexts(rows.map((r) => r.symbol)), tables, now: Date.now(),
+        accruedInterest: {}, // the hyperliquid model charges no interest
+      })
+      if (result.status !== 'ready') return skip([...result.anomalies, ...result.reasons].join('; '))
+      hyperliquidSkips.delete(accountId)
+      const state = result.state
+      if (!state.liquidatable) return
+
+      logger.warning(
+        `⚠️ HYPERLIQUID LIQUIDATION: account ${account.name} value ${state.accountValue!.toFixed(4)} < ` +
+          `maintenance margin ${state.maintenanceMargin!.toFixed(4)} at mark` +
+          (state.belowBackstop ? ' (below the 2/3 backstop level)' : ''),
+      )
+      const perps = rows.filter((r) => r.side)
+      const orderNos = await this.liquidatePositions(
+        account, perps,
+        `Hyperliquid cross margin: account value ${state.accountValue} < maintenance ${state.maintenanceMargin}`,
+      )
+      if (orderNos.length === 0) return // nothing could be closed: no event
+      db.insert(liquidationEvents).values({
+        accountId,
+        triggeredAt: Date.now(),
+        collateral: result.collateral.total,
+        accountValue: state.accountValue!,
+        maintenanceMargin: state.maintenanceMargin!,
+        belowBackstop: state.belowBackstop ? 1 : 0,
+        marks: JSON.stringify(result.input.markPrices),
+        positions: JSON.stringify(state.positions.map((p) => ({
+          coin: p.coin, side: p.side, size: p.size, mark: p.markPrice, notional: p.notional,
+          unrealizedPnl: p.unrealizedPnl, mmr: p.mmr, maintenanceMargin: p.maintenanceMargin,
+        }))),
+        orders: JSON.stringify(orderNos),
+        execution: 'every perpetual closed in full by a market order of the engine at the price path (mid), with the ' +
+          'taker fee of the cost model; no order book, bid/ask or slippage yet (006I-5); partial liquidation applies ' +
+          'only above 100k USDC; the backstop (liquidator vault) is not reproduced',
+      }).run()
+    } finally {
+      hyperliquidChecks.delete(accountId)
     }
   }
 
@@ -370,9 +476,10 @@ export class TaskScheduler {
     account: Account,
     positions: Position[],
     reason: string,
-  ): Promise<void> {
+  ): Promise<string[]> {
     const { placeAndExecuteCrypto } = await import('./orderExecutorLeverage.js')
     const { randomUUID } = await import('node:crypto')
+    const filled: string[] = []
 
     for (const position of positions) {
       const orderNo = `LIQ-${randomUUID().replace(/-/g, '').slice(0, 16).toUpperCase()}`
@@ -408,6 +515,7 @@ export class TaskScheduler {
           orderNo,
         })
 
+        filled.push(orderNo)
         logger.warning(
           `🔴 LIQUIDATED: ${account.name} ${closeSide} ${current.quantity} ${current.symbol} ` +
             `at market price. Reason: ${reason}`,
@@ -418,6 +526,7 @@ export class TaskScheduler {
         )
       }
     }
+    return filled
   }
 }
 

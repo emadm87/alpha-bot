@@ -3,6 +3,8 @@ import { eq } from 'drizzle-orm'
 import { db } from '../db/client.js'
 import { accounts, positions, type Account, type Position } from '../db/schema.js'
 import { getLastPrice } from './marketData.js'
+import { marksFromAssetContexts } from './hyperliquidMarginData.js'
+import { TICKER_MAX_AGE_MS } from './quantData.js'
 import { getLogger } from '../utils/logger.js'
 
 const logger = getLogger('services.assetCalculator')
@@ -39,6 +41,14 @@ export interface AccountEquity {
   unrealizedPnl: number
   /** Real exposure: sum(quantity * price). */
   exposure: number
+  /**
+   * Price of the unrealized P&L: 'mid' (the price path, original model) or
+   * 'mark' (Hyperliquid's mark price, hyperliquid model); 'mixed' when some
+   * hyperliquid positions had no valid, fresh mark and used the mid.
+   */
+  priceBasis: 'mid' | 'mark' | 'mixed'
+  /** Why a mark price could not be used, per symbol. */
+  priceIssues: string[]
 }
 
 /**
@@ -70,13 +80,31 @@ export async function calcAccountEquity(
   let postedMargin = 0
   let unrealizedPnl = 0
   let exposure = 0
+  // 'hyperliquid' model: unrealized P&L at Hyperliquid's mark price (docs:
+  // robust price indices); the mid is used only when the mark is missing or
+  // stale, and that is reported in priceIssues
+  const atMark = account.costModel === 'hyperliquid'
+  let marks = 0
+  let mids = 0
+  const priceIssues: string[] = []
 
   for (const p of rows) {
     if (p.quantity <= 0) continue
     postedMargin += positionMargin(p)
 
     try {
-      const price = await getLastPrice(p.symbol, p.market)
+      let price = await getLastPrice(p.symbol, p.market)
+      if (atMark) {
+        const quote = marksFromAssetContexts([p.symbol])[p.symbol]!
+        const age = quote.receivedAt === null ? Infinity : Date.now() - quote.receivedAt
+        if (quote.markPrice !== null && age <= TICKER_MAX_AGE_MS) {
+          price = quote.markPrice
+          marks++
+        } else {
+          mids++
+          priceIssues.push(`${p.symbol}: ${quote.issue ?? `mark price ${Math.round(age / 1000)} s old`}, mid used`)
+        }
+      }
       exposure += p.quantity * price
       unrealizedPnl +=
         p.side === 'SHORT'
@@ -96,6 +124,8 @@ export async function calcAccountEquity(
     postedMargin,
     unrealizedPnl,
     exposure,
+    priceBasis: !atMark ? 'mid' : mids === 0 ? 'mark' : marks === 0 ? 'mid' : 'mixed',
+    priceIssues,
   }
 }
 

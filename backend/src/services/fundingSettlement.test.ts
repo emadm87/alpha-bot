@@ -40,6 +40,9 @@ const reportModule = new URL('../../pilot/report.mjs', import.meta.url).href
 const { buildReport } = (await import(reportModule)) as { buildReport: (o: Record<string, unknown>) => any }
 
 ensureSchema()
+// Hyperliquid prices and metadata from the offline stub (006I-3 checks the leverage on opens)
+const { installHyperliquidStub, quote } = await import('./__fixtures__/hyperliquidStub.js')
+installHyperliquidStub()
 const user = db.insert(users).values({ username: 'default', isActive: 'true' }).returning().get()
 after(() => {
   rawDb.close()
@@ -87,7 +90,7 @@ function publish(coin: string, hour: number, rate: string) {
 beforeEach(() => {
   // one account per test: the settlement looks at every hyperliquid account
   rawDb.exec(
-    'DELETE FROM funding_payments; DELETE FROM funding_oracle_prices; DELETE FROM trades; ' +
+    'DELETE FROM liquidation_events; DELETE FROM funding_payments; DELETE FROM funding_oracle_prices; DELETE FROM trades; ' +
       'DELETE FROM positions; DELETE FROM orders; DELETE FROM accounts',
   )
   resetFundingRates()
@@ -338,7 +341,7 @@ test('9. hyperliquid: no original interest on add, partial close, close or liqui
   // liquidation through the real monitor
   await fill(id, 'SOL', 'LONG', 90, 10, 100, Date.now())
   back()
-  cachePrice('SOL', 'CRYPTO', 93)
+  quote('SOL', 85) // mark and mid: below the cross margin threshold (~91.2)
   await (new TaskScheduler() as any).checkMarginLevels()
   assert.equal(db.select().from(positions).where(and(eq(positions.accountId, id), eq(positions.symbol, 'SOL'))).get()!.quantity, 0)
   assert.ok(cashAfterFills(id).every((t) => t.interestCharged === 0), 'interest 0 on every fill')

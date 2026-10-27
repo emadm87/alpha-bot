@@ -1,7 +1,9 @@
 /**
  * Data for the Hyperliquid cross margin calculator (Task 006G-1): mark prices
  * and margin tables, validated and turned into hyperliquidMargin inputs.
- * Not used by the bot: nothing imports it, so it adds no traffic.
+ * Used by the 'hyperliquid' cost model (Task 006I-3): mark prices from the
+ * asset contexts the price path already keeps, margin tables from `meta`
+ * (hyperliquidMarket); fetchInfo below stays unused.
  *
  * Sources (public info endpoint, POST /info):
  * - `meta` / `metaAndAssetCtxs`: `universe` (name, maxLeverage,

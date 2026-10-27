@@ -1,0 +1,139 @@
+{
+ "_source": "POST https://api.hyperliquid.xyz/info {\"type\":\"meta\"}, 2026-10-27, universe and marginTables of the six AI markets only",
+ "universe": [
+  {
+   "szDecimals": 5,
+   "name": "BTC",
+   "maxLeverage": 40,
+   "marginTableId": 56
+  },
+  {
+   "szDecimals": 4,
+   "name": "ETH",
+   "maxLeverage": 25,
+   "marginTableId": 55
+  },
+  {
+   "szDecimals": 2,
+   "name": "SOL",
+   "maxLeverage": 20,
+   "marginTableId": 54
+  },
+  {
+   "szDecimals": 3,
+   "name": "BNB",
+   "maxLeverage": 10,
+   "marginTableId": 51
+  },
+  {
+   "szDecimals": 0,
+   "name": "DOGE",
+   "maxLeverage": 10,
+   "marginTableId": 52
+  },
+  {
+   "szDecimals": 0,
+   "name": "XRP",
+   "maxLeverage": 20,
+   "marginTableId": 53
+  }
+ ],
+ "marginTables": [
+  [
+   51,
+   {
+    "description": "tiered 10x",
+    "marginTiers": [
+     {
+      "lowerBound": "0.0",
+      "maxLeverage": 10
+     },
+     {
+      "lowerBound": "3000000.0",
+      "maxLeverage": 5
+     }
+    ]
+   }
+  ],
+  [
+   52,
+   {
+    "description": "tiered 10x (2)",
+    "marginTiers": [
+     {
+      "lowerBound": "0.0",
+      "maxLeverage": 10
+     },
+     {
+      "lowerBound": "20000000.0",
+      "maxLeverage": 5
+     }
+    ]
+   }
+  ],
+  [
+   53,
+   {
+    "description": "tiered 20x",
+    "marginTiers": [
+     {
+      "lowerBound": "0.0",
+      "maxLeverage": 20
+     },
+     {
+      "lowerBound": "40000000.0",
+      "maxLeverage": 10
+     }
+    ]
+   }
+  ],
+  [
+   54,
+   {
+    "description": "tiered 20x (2)",
+    "marginTiers": [
+     {
+      "lowerBound": "0.0",
+      "maxLeverage": 20
+     },
+     {
+      "lowerBound": "70000000.0",
+      "maxLeverage": 10
+     }
+    ]
+   }
+  ],
+  [
+   55,
+   {
+    "description": "tiered 25x",
+    "marginTiers": [
+     {
+      "lowerBound": "0.0",
+      "maxLeverage": 25
+     },
+     {
+      "lowerBound": "100000000.0",
+      "maxLeverage": 15
+     }
+    ]
+   }
+  ],
+  [
+   56,
+   {
+    "description": "tiered 40x",
+    "marginTiers": [
+     {
+      "lowerBound": "0.0",
+      "maxLeverage": 40
+     },
+     {
+      "lowerBound": "150000000.0",
+      "maxLeverage": 20
+     }
+    ]
+   }
+  ]
+ ]
+}

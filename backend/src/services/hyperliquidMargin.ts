@@ -1,7 +1,8 @@
 /**
  * Hyperliquid cross margin math, as documented by Hyperliquid (Task 006G-0).
  * Pure functions: positions, mark prices and margin tables are inputs; no
- * network, no database. Not connected to the margin monitor.
+ * network, no database. Used by the margin monitor for 'hyperliquid' accounts
+ * (Task 006I-3).
  *
  * Rules implemented (official docs: trading/margining, trading/liquidations,
  * trading/margin-tiers):

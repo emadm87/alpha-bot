@@ -213,6 +213,31 @@ export const fundingPayments = sqliteTable(
   }),
 )
 
+/**
+ * Liquidations decided by the Hyperliquid cross margin rule (Task 006I-3):
+ * the account value and maintenance margin at mark that triggered them and
+ * the orders that closed the positions. The 'original' monitor writes none.
+ */
+export const liquidationEvents = sqliteTable('liquidation_events', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  accountId: integer('account_id').notNull(),
+  /** ms since epoch */
+  triggeredAt: integer('triggered_at').notNull(),
+  collateral: real('collateral').notNull(),
+  accountValue: real('account_value').notNull(),
+  maintenanceMargin: real('maintenance_margin').notNull(),
+  /** 1 when account value < 2/3 of maintenance (Hyperliquid's backstop level). */
+  belowBackstop: integer('below_backstop').notNull(),
+  /** JSON: { coin: mark price } used for the decision. */
+  marks: text('marks').notNull(),
+  /** JSON: positions at mark with their maintenance margin. */
+  positions: text('positions').notNull(),
+  /** JSON: order numbers of the LIQ- closes. */
+  orders: text('orders').notNull(),
+  /** How the positions were closed, with its approximation. */
+  execution: text('execution').notNull(),
+})
+
 /** Oracle prices captured live right after each funding hour (Task 006I-2). */
 export const fundingOraclePrices = sqliteTable('funding_oracle_prices', {
   fundingTime: integer('funding_time').notNull(),

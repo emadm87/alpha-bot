@@ -1,7 +1,8 @@
 /**
  * Adapter from ALPHA BOT accounting rows to the Hyperliquid cross margin
  * calculator (Task 006G-3). Pure: account and position rows, mark quotes and
- * margin tables are inputs; no database, no network. Not used by the bot.
+ * margin tables are inputs; no database, no network. Used by the margin
+ * monitor for 'hyperliquid' accounts (Task 006I-3).
  *
  * Collateral reconciliation. The perpetual engine takes each position's
  * margin out of cash at open and gives it back at close, so the USDC backing
@@ -80,7 +81,7 @@ export function crossInputFromAccount(params: {
 }): AdapterResult {
   const { account } = params
   const anomalies: string[] = []
-  const notes: string[] = ['funding is not modelled: Hyperliquid would settle it hourly on the notional']
+  const notes: string[] = ['funding already settled is part of cash (hyperliquid cost model, 006I-2); the hour in progress is not']
   const spotExcluded: SpotHolding[] = []
   const perps: CrossPosition[] = []
   let perpMargin = 0

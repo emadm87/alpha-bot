@@ -127,6 +127,18 @@ export async function placeAndExecuteCrypto(params: {
 
   const notional = execPrice * quantity
 
+  // 'hyperliquid' model: an open above the market's maximum leverage (the
+  // margin tier of the resulting position, from Hyperliquid's meta) is
+  // refused, as the exchange would. The cost model never changes, so the
+  // caller's row is enough to read it.
+  if (account.costModel === 'hyperliquid' && (side === 'LONG' || side === 'SHORT')) {
+    const held = db.select().from(positions)
+      .where(and(eq(positions.accountId, account.id), eq(positions.symbol, symbol), eq(positions.market, 'CRYPTO'))).get()
+    const { hyperliquidLeverageIssue } = await import('./hyperliquidMarket.js')
+    const issue = await hyperliquidLeverageIssue(symbol, leverage, notional + (held?.side ? held.quantity * execPrice : 0))
+    if (issue) throw new Error(issue)
+  }
+
   return db.transaction((tx) => {
     const order = tx
       .insert(orders)

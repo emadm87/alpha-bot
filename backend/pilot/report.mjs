@@ -28,9 +28,11 @@ const RATE_H = engineConstant('CRYPTO_INTEREST_RATE_HOURLY') // interessi orari 
 const MODEL_NOTES = {
   original: 'regole economiche dell\'autore: commissione taker 0,07%, interessi sulla parte a prestito, liquidazione e prezzi originali',
   hyperliquid: 'riproduce la commissione taker perpetual di Hyperliquid al livello base (ipotesi: volume a 14 giorni < 5M USD, ' +
-    'nessuno sconto) e il funding orario (tasso realizzato da fundingHistory x oracle price catturato all\'ora x quantita; ' +
-    'gli interessi dell\'originale non si applicano). Mark price, liquidazioni cross, precisione degli ordini e bid/ask NON ' +
-    'sono ancora modellati: monitor, liquidazioni e prezzi di esecuzione restano quelli dell\'originale',
+    'nessuno sconto), il funding orario (tasso realizzato da fundingHistory x oracle price catturato all\'ora x quantita; ' +
+    'nessun interesse dell\'originale), il mark price per P&L non realizzato, equity e margine, il cross margin con le fasce ' +
+    'ufficiali (liquidazione quando il valore del conto a mark scende sotto il margine di mantenimento, anche 1x) e la leva ' +
+    'massima per mercato. NON ancora modellati: esecuzione al bid/ask e slippage (gli ordini, liquidazioni comprese, si ' +
+    'eseguono al mid), precisione degli ordini, backstop della vault di liquidazione',
 }
 
 export function buildReport({ dbFile, traceFile, accountId: requested, prices, at, priceIn, priceOut }) {
@@ -53,6 +55,10 @@ const orders = db.prepare('SELECT * FROM orders WHERE account_id=?').all(account
 const positions = db.prepare('SELECT * FROM positions WHERE account_id=? AND quantity>0').all(accountId)
 const decisions = db.prepare('SELECT * FROM ai_decision_logs WHERE account_id=? ORDER BY decision_time, id').all(accountId)
 const hasFunding = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='funding_payments'").get()
+const hasLiquidationEvents = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='liquidation_events'").get()
+const liquidationEvents = hasLiquidationEvents
+  ? db.prepare('SELECT * FROM liquidation_events WHERE account_id=? ORDER BY triggered_at, id').all(accountId)
+  : [] // database precedenti al 006I-3
 const fundingRows = hasFunding
   ? db.prepare('SELECT * FROM funding_payments WHERE account_id=? ORDER BY funding_time, symbol').all(accountId)
   : [] // database precedenti al 006I-2: nessun funding
@@ -198,6 +204,12 @@ const gross = realized + unrealized
 const net = finalEquity - acc.initial_capital // = lordo - commissioni - interessi addebitati + funding netto
 if (Math.abs(net - (gross - fees - interest + fundingNet)) > 1e-6) issues.push('identita netto = lordo - costi non verificata')
 for (const o of orders) if (o.status !== 'FILLED') issues.push(`ordine ${o.id} ${o.status}`)
+if (costModel !== 'hyperliquid' && liquidationEvents.length) issues.push('eventi di liquidazione cross su un conto non hyperliquid')
+const liqOrders = new Set(trades.filter((t) => t.order_no.startsWith('LIQ-')).map((t) => t.order_no))
+for (const e of liquidationEvents) {
+  for (const no of JSON.parse(e.orders)) if (!liqOrders.has(no)) issues.push(`liquidazione ${e.id}: ordine ${no} senza fill`)
+  if (!(e.account_value < e.maintenance_margin)) issues.push(`liquidazione ${e.id}: valore del conto non sotto il margine di mantenimento`)
+}
 
 // --- serie di equity: Total Assets per ciclo + valore finale -----------------------------------
 const series = [
@@ -255,6 +267,21 @@ return {
     gross_usdc: r(gross), gross_pct: pct(gross), realized: r(realized), unrealized: r(unrealized),
     fees: r(fees), interest_charged: r(interest), funding_net: r(fundingNet, 6), net_usdc: r(net), net_pct: pct(net),
     accrued_interest_not_charged: r(accrued, 6), net_after_accrued_usdc: r(net - accrued),
+  },
+  // Margine e liquidazioni: la regola dell'autore (original) o il cross margin Hyperliquid a mark.
+  margin: {
+    rule: costModel === 'hyperliquid'
+      ? 'cross margin Hyperliquid: valore del conto a mark < somma dei margini di mantenimento (fasce ufficiali), ogni perpetual anche 1x'
+      : 'regola dell\'autore: equity / marginUsed < maintenance_margin_ratio, solo posizioni sopra 1x',
+    valuation_note: costModel === 'hyperliquid'
+      ? 'il motore, il monitor e il prompt valutano a mark; questo report valuta ai prezzi finali indicati (ultimo prompt = mid, ' +
+        'oppure --prices): il mark non e salvato nel database'
+      : null,
+    liquidation_events: liquidationEvents.map((e) => ({
+      at: new Date(e.triggered_at).toISOString(), account_value: r(e.account_value, 6), maintenance_margin: r(e.maintenance_margin, 6),
+      collateral: r(e.collateral, 6), below_backstop: e.below_backstop === 1, marks: JSON.parse(e.marks),
+      positions: JSON.parse(e.positions), orders: JSON.parse(e.orders), execution: e.execution,
+    })),
   },
   // Funding orario Hyperliquid: separato da commissioni e interessi, gia incluso in cassa, equity e netto.
   funding: {

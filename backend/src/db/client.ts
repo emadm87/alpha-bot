@@ -281,6 +281,21 @@ CREATE TABLE IF NOT EXISTS funding_payments (
 	UNIQUE (account_id, symbol, funding_time)
 );
 CREATE INDEX IF NOT EXISTS ix_funding_payments_id ON funding_payments (id);
+CREATE TABLE IF NOT EXISTS liquidation_events (
+	id INTEGER NOT NULL,
+	account_id INTEGER NOT NULL,
+	triggered_at INTEGER NOT NULL,
+	collateral FLOAT NOT NULL,
+	account_value FLOAT NOT NULL,
+	maintenance_margin FLOAT NOT NULL,
+	below_backstop INTEGER NOT NULL,
+	marks TEXT NOT NULL,
+	positions TEXT NOT NULL,
+	orders TEXT NOT NULL,
+	execution TEXT NOT NULL,
+	PRIMARY KEY (id),
+	FOREIGN KEY(account_id) REFERENCES accounts (id)
+);
 CREATE TABLE IF NOT EXISTS funding_oracle_prices (
 	funding_time INTEGER NOT NULL,
 	symbol VARCHAR(20) NOT NULL,

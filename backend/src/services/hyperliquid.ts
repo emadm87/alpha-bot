@@ -169,6 +169,14 @@ class HyperliquidClient {
   }
 
   /**
+   * Raw `meta` response (universe with maxLeverage and marginTableId, and
+   * marginTables, which ccxt's own parsing drops). Errors are thrown.
+   */
+  async getMeta(): Promise<unknown> {
+    return this.getExchange().publicPostInfo({ type: 'meta' })
+  }
+
+  /**
    * Realised hourly funding of a perpetual: rows { coin, fundingRate,
    * premium, time } from the public fundingHistory request, oldest first.
    * Errors are thrown so the caller can retry later.
@@ -304,6 +312,8 @@ export const getCandleSnapshotFromHyperliquid = (
   startTime: number,
   endTime: number,
 ) => hyperliquidClient.getCandleSnapshot(coin, interval, startTime, endTime)
+
+export const getMetaFromHyperliquid = () => hyperliquidClient.getMeta()
 
 export const getFundingHistoryFromHyperliquid = (coin: string, startTime: number, endTime: number) =>
   hyperliquidClient.getFundingHistory(coin, startTime, endTime)

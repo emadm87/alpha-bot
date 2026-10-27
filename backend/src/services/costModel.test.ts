@@ -51,6 +51,9 @@ const reportModule = new URL('../../pilot/report.mjs', import.meta.url).href
 const { buildReport } = (await import(reportModule)) as { buildReport: (o: Record<string, unknown>) => any }
 
 ensureSchema()
+// Hyperliquid prices and metadata from the offline stub (006I-3 checks the leverage on opens)
+const { installHyperliquidStub, quote } = await import('./__fixtures__/hyperliquidStub.js')
+installHyperliquidStub()
 const user = db.insert(users).values({ username: 'default', isActive: 'true' }).returning().get()
 after(() => {
   stopScheduler()
@@ -145,26 +148,31 @@ test('2. hyperliquid: 0.045% on open, partial close, full close, LONG and SHORT'
   const rep = assertReconciled(id, PRICES)
   assert.equal(rep.cost_model.model, 'hyperliquid')
   assert.match(rep.cost_model.note, /commissione taker perpetual di Hyperliquid al livello base/)
-  assert.match(rep.cost_model.note, /Mark price, liquidazioni cross, precisione degli ordini e bid\/ask NON/)
+  assert.match(rep.cost_model.note, /NON ancora modellati: esecuzione al bid\/ask e slippage/)
   assert.ok(fills(id).every((t) => t.interestCharged === 0), 'no original interest (funding instead, 006I-2)')
   // the gap between the models is only the fee difference
   near(account(id).currentCash + interestOf(id) - scenarioCash(OG), (OG - HL) * 1471.25, 'difference = fees only', 1e-9)
 })
 
-test('3. hyperliquid: liquidation fill at 0.045%, original rule unchanged', async () => {
+test('3. hyperliquid: liquidation fill at 0.045% (cross margin rule since 006I-3)', async () => {
   // the monitor scans every account: leave only this one's position open
   rawDb.prepare('UPDATE positions SET quantity = 0, available_quantity = 0').run()
   const id = newAccount('hyperliquid')
   await fill(id, 'SOL', 'LONG', 90, 10, 100) // notional 9000: fee 4.05, margin 900
   near(account(id).currentCash, 1000 - 900 - 4.05, 'cash after open')
-  cacheAll({ ...PRICES, SOL: 93 }) // equity 995.95 - 630 = 365.95 < 0.5 * 900
+  // at 93 the author's rule would liquidate (365.95 < 0.5 * 900); the cross rule does not:
+  // account value 365.95 > maintenance 8370 / 40 = 209.25
+  quote('SOL', 93)
   await (new TaskScheduler() as any).checkMarginLevels()
-  assert.equal(position(id, 'SOL').quantity, 0, 'liquidated')
+  assert.equal(position(id, 'SOL').quantity, 90, 'kept at 93')
+  quote('SOL', 91) // account value 185.95 < maintenance 8190 / 40 = 204.75
+  await (new TaskScheduler() as any).checkMarginLevels()
+  assert.equal(position(id, 'SOL').quantity, 0, 'liquidated at 91')
   const liq = fills(id).at(-1)!
-  near(liq.commission, 8370 * HL, 'liquidation fee') // 3.7665
+  near(liq.commission, 8190 * HL, 'liquidation fee') // 3.6855
   assert.equal(liq.feeRate, HL)
-  near(account(id).currentCash, 1000 - 4.05 - 630 - 3.7665 - liq.interestCharged, 'cash after liquidation', 1e-9)
-  const rep = assertReconciled(id, { ...PRICES, SOL: 93 })
+  near(account(id).currentCash, 1000 - 4.05 - 810 - 3.6855, 'cash after liquidation', 1e-9)
+  const rep = assertReconciled(id, { ...PRICES, SOL: 91 })
   assert.equal(rep.operations.liquidations, 1)
 })
 

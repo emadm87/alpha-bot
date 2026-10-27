@@ -96,8 +96,12 @@ immutabile, quindi una prova non mescola mai due modelli:
   perpetual tenuta (anche 1x), quantità × prezzo oracle × tasso orario realizzato; con tasso positivo
   paga il LONG e incassa lo SHORT. Il tasso viene da `fundingHistory`; il prezzo oracle viene
   catturato dall'app entro 60 s dall'ora (Hyperliquid non ne pubblica lo storico): se l'app era ferma
-  a quell'ora, l'ora resta **non regolata** (`missing_oracle`), senza importo. Mark price,
-  liquidazioni cross, precisione degli ordini e bid/ask non sono ancora modellati.
+  a quell'ora, l'ora resta **non regolata** (`missing_oracle`), senza importo. Equity, P&L non
+  realizzato e margine sono a **mark price**; la liquidazione segue il **cross margin** di Hyperliquid
+  (valore del conto a mark sotto la somma dei margini di mantenimento delle fasce ufficiali, anche 1x)
+  e le aperture sopra la leva massima del mercato (da `meta`) sono rifiutate. Senza mark price valido
+  e recente o senza tabelle di margine non si liquida nulla. Non ancora modellati: esecuzione al
+  bid/ask (ordini e liquidazioni si eseguono al mid), precisione degli ordini, backstop della vault.
 
 Il launcher invia il modello alla creazione del conto e si ferma se l'app risponde con un altro
 modello. Fuori dal launcher lo stesso valore si può dare con la variabile `ALPHA_COST_MODEL` (usata
@@ -193,6 +197,8 @@ Contiene:
 - `cost_model`: modello economico del conto, tasso taker applicato e tassi registrati nei fill, con
   la nota di cosa il modello copre;
 - commissioni e interessi addebitati, e a parte quelli maturati ma non addebitati;
+- `margin`: regola di liquidazione del modello ed eventi di liquidazione cross (valore del conto,
+  margine di mantenimento, mark usati, ordini `LIQ-`, modalità di esecuzione);
 - `funding` (modello hyperliquid): pagato, ricevuto e netto, già inclusi in cassa, equity e netto;
   ore regolate, non regolate per dati mancanti (`missing_oracle`, `missing_rate`) e non registrate
   (regolazione in attesa o app ferma);
