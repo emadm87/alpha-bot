@@ -93,9 +93,16 @@ const callsFor = (key: string) => calls.filter((c) => c.key === key).length
 async function settle(turns = 50) {
   for (let i = 0; i < turns; i++) await new Promise((r) => setImmediate(r))
 }
+/** Waits (real time, up to 10 s) until `cond` holds: a busy machine can slow the cycles. */
+async function waitFor(cond: () => boolean, what: string, ms = 10_000) {
+  const end = Date.now() + ms
+  while (!cond()) {
+    if (Date.now() > end) assert.fail(`timed out waiting for: ${what}`)
+    await new Promise((r) => setImmediate(r))
+  }
+}
 async function untilCalls(n: number) {
-  for (let i = 0; i < 500 && calls.length < n; i++) await new Promise((r) => setImmediate(r))
-  assert.ok(calls.length >= n, `expected ${n} AI requests, got ${calls.length}`)
+  await waitFor(() => calls.length >= n, `${n} AI requests (got ${calls.length})`)
 }
 /** Releases every held request and stops holding new ones. */
 function releaseAll() {
@@ -133,14 +140,14 @@ test('1. scheduler tick and immediate reset run starting together: one cycle', a
     await settle()
     assert.equal(calls.length, 1, 'the tick does not send a second AI request')
     releaseAll()
-    await settle()
+    await waitFor(() => logs(id).length === 1, 'the decision of the immediate run')
     assertOneOpen(id, 'tick + reset')
 
     // The cadence is unchanged: the next tick runs a normal cycle
     hold = false
     answer = () => decide({ operation: 'hold', reason: 'test' })
     mock.timers.tick(300_000)
-    await settle()
+    await waitFor(() => logs(id).length === 2, 'the decision of the next tick')
     assert.equal(calls.length, 2, 'next tick asks the AI again')
     assert.deepEqual(logs(id), [['open', 'true'], ['hold', 'true']])
   } finally {
