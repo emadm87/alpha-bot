@@ -290,6 +290,9 @@ export async function placeAndExecuteCrypto(params: {
             leverage,
             margin: initialMargin,
             side,
+            // a reopened row starts a new position: interest charged on the
+            // previous one stays in its trades
+            accumulatedInterest: 0,
             lastInterestTime: utcNow(),
             updateTime: utcNow(),
           })

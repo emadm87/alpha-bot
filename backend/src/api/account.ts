@@ -1,7 +1,7 @@
 /** Account and Asset Curve API Routes. Port of `api/account_routes.py`. */
 import { Hono } from 'hono'
 import { HTTPException } from 'hono/http-exception'
-import { and, asc, eq, gt } from 'drizzle-orm'
+import { and, eq, gt } from 'drizzle-orm'
 import { db } from '../db/client.js'
 import {
   accounts,
@@ -11,14 +11,16 @@ import {
   users,
   type Account,
 } from '../db/schema.js'
+import { calcAccountEquity } from '../services/assetCalculator.js'
 import {
-  calcAccountEquity,
-  calcPositionsMarketValue,
-} from '../services/assetCalculator.js'
+  accountFills,
+  curvePoint,
+  klineCloseAt,
+  replayEquity,
+} from '../services/assetCurveCalculator.js'
 import { getKlineData, type Kline } from '../services/marketData.js'
 import { resetAutoTradingJob } from '../services/scheduler.js'
 import { getLogger } from '../utils/logger.js'
-import { dbDateMs } from '../utils/datetime.js'
 
 const logger = getLogger('api.account')
 
@@ -42,7 +44,7 @@ function accountPayload(account: Account, username: string) {
 }
 
 /** Get all active accounts (for paper trading demo). */
-accountRoutes.get('/list', (c) => {
+accountRoutes.get('/list', async (c) => {
   try {
     const rows = db
       .select()
@@ -51,14 +53,20 @@ accountRoutes.get('/list', (c) => {
       .all()
 
     return c.json(
-      rows.map((account) => {
+      await Promise.all(rows.map(async (account) => {
         const user = db
           .select()
           .from(users)
           .where(eq(users.id, account.userId))
           .get()
-        return accountPayload(account, user?.username ?? 'unknown')
-      }),
+        // Same account value as /overview: the account selector shows it
+        const { equity, positionsEquity } = await calcAccountEquity(account)
+        return {
+          ...accountPayload(account, user?.username ?? 'unknown'),
+          total_assets: equity,
+          positions_value: positionsEquity,
+        }
+      })),
     )
   } catch (e) {
     logger.error(`Failed to list accounts: ${e}`)
@@ -195,17 +203,12 @@ accountRoutes.get('/asset-curve/timeframe', async (c) => {
     const firstKlines = symbolKlines.values().next().value as Kline[]
     const timestamps = firstKlines.map((k) => k.timestamp)
 
-    const result: Record<string, unknown>[] = []
+    const result: object[] = []
 
     for (const account of activeAccounts) {
-      const accountTrades = db
-        .select()
-        .from(tradesTable)
-        .where(eq(tradesTable.accountId, account.id))
-        .orderBy(asc(tradesTable.tradeTime))
-        .all()
+      const fills = accountFills(account.id)
 
-      if (accountTrades.length === 0) {
+      if (fills.length === 0) {
         // No trades, return initial capital at all timestamps
         timestamps.forEach((ts, i) => {
           result.push({
@@ -224,67 +227,22 @@ accountRoutes.get('/asset-curve/timeframe', async (c) => {
         continue
       }
 
+      // Same equity as the WebSocket curve (assetCurveCalculator): rebuilt
+      // from the fills at each close, live equity for the last point
       for (let i = 0; i < timestamps.length; i++) {
         const ts = timestamps[i]!
-        const tsMs = ts * 1000
-        const isLastTimestamp = i === timestamps.length - 1
-
-        let cashChange = 0.0
-        const positionQuantities = new Map<string, number>()
-
-        for (const trade of accountTrades) {
-          if (dbDateMs(trade.tradeTime) > tsMs) continue
-
-          const tradeAmount =
-            trade.price * trade.quantity +
-            trade.commission +
-            trade.interestCharged
-          const isOpen = trade.side === 'BUY' || trade.side === 'LONG'
-          cashChange += isOpen ? -tradeAmount : tradeAmount
-
-          const key = `${trade.symbol} ${trade.market}`
-          const prev = positionQuantities.get(key) ?? 0.0
-          positionQuantities.set(
-            key,
-            isOpen ? prev + trade.quantity : prev - trade.quantity,
-          )
-        }
-
-        const currentCash = isLastTimestamp
-          ? account.currentCash
-          : account.initialCapital + cashChange
-
-        let positionsValue = 0.0
-        if (isLastTimestamp) {
-          positionsValue = await calcPositionsMarketValue(account.id)
+        const datetimeStr = firstKlines[i]?.datetime_str ?? ''
+        if (i === timestamps.length - 1) {
+          const live = await calcAccountEquity(account)
+          result.push(curvePoint(account, ts, datetimeStr, {
+            equity: live.equity, cash: account.currentCash, positionsValue: live.positionsEquity,
+          }))
         } else {
-          for (const [key, quantity] of positionQuantities) {
-            if (quantity <= 0) continue
-            const klines = symbolKlines.get(key)
-            if (!klines || i >= klines.length) continue
-            const price = klines[i]?.close
-            if (price) positionsValue += price * quantity
-          }
+          const replayed = replayEquity(account.initialCapital, fills, ts * 1000, (symbol, market) =>
+            klineCloseAt(symbolKlines.get(`${symbol} ${market}`), ts),
+          )
+          result.push(curvePoint(account, ts, datetimeStr, replayed))
         }
-
-        const totalAssets = currentCash + positionsValue
-        const initialCapital = account.initialCapital
-        const profit = totalAssets - initialCapital
-        const profitPercentage =
-          initialCapital > 0 ? (profit / initialCapital) * 100 : 0.0
-
-        result.push({
-          timestamp: ts,
-          datetime_str: firstKlines[i]?.datetime_str ?? '',
-          user_id: account.userId,
-          username: account.name,
-          total_assets: totalAssets,
-          initial_capital: initialCapital,
-          profit,
-          profit_percentage: profitPercentage,
-          cash: currentCash,
-          positions_value: positionsValue,
-        })
       }
     }
 

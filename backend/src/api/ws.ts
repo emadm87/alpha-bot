@@ -12,7 +12,7 @@ import { getOrCreateUser, getUser } from '../repositories/user.js'
 import { listOrders } from '../repositories/order.js'
 import { listPositions } from '../repositories/position.js'
 import {
-  calcPositionsMarketValue,
+  calcAccountEquity,
   calcPositionsValue,
 } from '../services/assetCalculator.js'
 import { getLastPrice } from '../services/marketData.js'
@@ -125,7 +125,8 @@ function buildOverview(
   positionsMarketValue: number,
   positionsNotionalValue: number,
 ) {
-  // Total assets = cash + market value (NOT notional)
+  // Total assets = cash + posted margin + unrealized P&L (calcAccountEquity),
+  // the same account value as /overview and the AI prompt
   const totalAssets = positionsMarketValue + account.currentCash
   const initialCapital = account.initialCapital
   const returnRate =
@@ -177,7 +178,7 @@ async function buildSnapshot(accountId: number, limit: number) {
     .limit(limit)
     .all()
 
-  const positionsMarketValue = await calcPositionsMarketValue(accountId)
+  const positionsMarketValue = (await calcAccountEquity(account)).positionsEquity
   const positionsNotionalValue = await calcPositionsValue(accountId)
 
   // Batch price fetching: one lookup per unique (symbol, market)
