@@ -167,6 +167,13 @@ export async function placeAndExecuteCrypto(params: {
       )
       .get()
 
+    // Cash and margin are read here, inside the transaction, rather than
+    // taken from the caller's account: that row may have been read before an
+    // await (an AI call, a price fetch) during which another fill or a
+    // liquidation changed it, and writing it back would create or destroy cash.
+    const booked = tx.select().from(accounts).where(eq(accounts.id, account.id)).get()
+    if (!booked) throw new Error(`Account ${account.id} not found`)
+
     // A perpetual would overwrite a spot holding (side null, from
     // orderMatching) on the same row: refused until the holding is closed.
     if ((side === 'LONG' || side === 'SHORT') && pos && !pos.side && pos.quantity > 0) {
@@ -178,16 +185,15 @@ export async function placeAndExecuteCrypto(params: {
     // An older perpetual whose margin cannot be rebuilt would close or grow
     // with a wrong margin, creating or destroying cash: refused.
     if (pos && pos.side && pos.quantity > 0 && pos.margin === null) {
-      const booked = tx.select().from(accounts).where(eq(accounts.id, account.id)).get()
       const issue = legacyMarginIssue(
-        booked?.marginUsed ?? account.marginUsed,
+        booked.marginUsed,
         tx.select().from(positions).where(eq(positions.accountId, account.id)).all(),
       )
       if (issue) throw new Error(`Cannot ${side} ${symbol}: ${issue}`)
     }
 
-    let currentCash = account.currentCash
-    let marginUsed = account.marginUsed
+    let currentCash = booked.currentCash
+    let marginUsed = booked.marginUsed
     let interestCharged = 0
 
     if (side === 'LONG' || side === 'SHORT') {
