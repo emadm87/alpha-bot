@@ -17,6 +17,7 @@ Gli script non modificano codice, prompt, strategie, sizing, leva, monitor o liq
 | `run-pilot.mjs` | Avvio sorvegliato dell'app con arresto automatico, poi report |
 | `check-run.mjs` | Controllo di `backend.log` e della traccia 006B (sola lettura) |
 | `report.mjs` | Report economico dal database (aperto in sola lettura) e dalla traccia |
+| `compare.mjs` | Confronto a posteriori Originale vs Hyperliquid sugli stessi fill (sezione `comparison` del report, 006I-6) |
 | `ccxt-proxy.mjs` | Shim di trasporto: aggiunge solo `httpsProxy` a ccxt (serve solo con proxy HTTPS obbligatorio) |
 | `test/selftest.mjs` | Verifica offline di tutti gli script (nessuna rete, nessuna AI) |
 | `test/build-synthetic.mts` | Database SINTETICO generato dal motore reale, solo per i test |

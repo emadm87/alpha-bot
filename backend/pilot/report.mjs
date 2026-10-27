@@ -9,6 +9,7 @@
 import fs from 'node:fs'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
+import { buildComparison } from './compare.mjs'
 const require = createRequire(new URL('../package.json', import.meta.url))
 const Database = require('better-sqlite3')
 
@@ -396,6 +397,13 @@ return {
   benchmarks: { hold_usdc: acc.initial_capital, btc_buy_and_hold_1x_usdc: r(btcBH), btc_from: p0 ?? null, btc_to: p1 ?? null },
   reconciliation: { cash_expected: r(cashExpected, 6), cash_recorded: r(acc.current_cash, 6), ok: issues.length === 0 },
   issues,
+  // Confronto a posteriori Originale vs Hyperliquid sugli stessi fill (006I-6): sezione separata, non
+  // modifica i valori sopra; le sue anomalie restano in comparison.issues
+  comparison: buildComparison({
+    costModel, initialCapital: acc.initial_capital, trades, orders, bookFills: bookFillRows, fundingRows,
+    fundingNotRecorded, finalPrices, asOf, feeRates: FEE_BY_MODEL, interestRateHourly: RATE_H,
+    refused: refusedOrders, recordedNet: net,
+  }),
 }
 } finally {
   db.close()

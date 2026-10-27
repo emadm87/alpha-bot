@@ -39,7 +39,7 @@ const sha = (f) => crypto.createHash('sha256').update(fs.readFileSync(f)).digest
 const node = (argv, env = {}) => spawnSync(process.execPath, argv, { cwd: backendDir, env: { ...process.env, ...env }, encoding: 'utf8' })
 
 await step('sintassi degli script', () => {
-  for (const f of ['check-run.mjs', 'report.mjs', 'ccxt-proxy.mjs', 'run-pilot.mjs', 'ai-budget.mjs', 'test/fake-backend.mjs', 'test/selftest.mjs']) {
+  for (const f of ['check-run.mjs', 'report.mjs', 'compare.mjs', 'ccxt-proxy.mjs', 'run-pilot.mjs', 'ai-budget.mjs', 'test/fake-backend.mjs', 'test/selftest.mjs']) {
     const r = node(['--check', path.join(pilotDir, f)])
     assert.equal(r.status, 0, `${f}: ${r.stderr}`)
   }
