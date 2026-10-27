@@ -148,7 +148,9 @@ test('2. hyperliquid: 0.045% on open, partial close, full close, LONG and SHORT'
   const rep = assertReconciled(id, PRICES)
   assert.equal(rep.cost_model.model, 'hyperliquid')
   assert.match(rep.cost_model.note, /commissione taker perpetual di Hyperliquid al livello base/)
-  assert.match(rep.cost_model.note, /NON ancora modellati: esecuzione al bid\/ask e slippage/)
+  // bid/ask and depth are modelled since 006I-5 (book); what is left is listed
+  assert.match(rep.cost_model.note, /IOC sul book l2Book/)
+  assert.match(rep.cost_model.note, /NON ancora modellati: profondita oltre i 20 livelli visibili/)
   assert.ok(fills(id).every((t) => t.interestCharged === 0), 'no original interest (funding instead, 006I-2)')
   // the gap between the models is only the fee difference
   near(account(id).currentCash + interestOf(id) - scenarioCash(OG), (OG - HL) * 1471.25, 'difference = fees only', 1e-9)

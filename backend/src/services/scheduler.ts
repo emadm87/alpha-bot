@@ -420,9 +420,11 @@ export class TaskScheduler {
           unrealizedPnl: p.unrealizedPnl, mmr: p.mmr, maintenanceMargin: p.maintenanceMargin,
         }))),
         orders: JSON.stringify(orderNos),
-        execution: 'every perpetual closed in full by a market order of the engine at the price path (mid), with the ' +
-          'taker fee of the cost model; no order book, bid/ask or slippage yet (006I-5); partial liquidation applies ' +
-          'only above 100k USDC; the backstop (liquidator vault) is not reproduced',
+        execution: 'every perpetual closed by a market order of the engine against an l2Book snapshot (006I-5): sells ' +
+          'take the bids, buys the asks, at the volume-weighted price of the levels taken, without the slippage bound, ' +
+          'with the taker fee of the cost model; size the visible book cannot fill stays open (status PARTIALLY_FILLED) ' +
+          'and is checked again at mark by the next monitor run; without a valid, fresh book nothing is closed; ' +
+          'partial liquidation applies only above 100k USDC; the backstop (liquidator vault) is not reproduced',
       }).run()
     } finally {
       hyperliquidChecks.delete(accountId)
@@ -503,7 +505,7 @@ export class TaskScheduler {
         // The perpetual engine records the order, the fill, the margin
         // release and the position reset in one transaction, so a failed
         // close leaves nothing behind.
-        await placeAndExecuteCrypto({
+        const order = await placeAndExecuteCrypto({
           account: latestAccount,
           symbol: current.symbol,
           name: current.name,
@@ -516,9 +518,11 @@ export class TaskScheduler {
         })
 
         filled.push(orderNo)
+        // 'hyperliquid' model: the book may fill only part of the position
+        const rest = Number((current.quantity - order.filledQuantity).toFixed(10))
         logger.warning(
-          `🔴 LIQUIDATED: ${account.name} ${closeSide} ${current.quantity} ${current.symbol} ` +
-            `at market price. Reason: ${reason}`,
+          `🔴 LIQUIDATED: ${account.name} ${closeSide} ${order.filledQuantity} ${current.symbol} ` +
+            `at market price${rest > 0 ? ` (book exhausted: ${rest} still open)` : ''}. Reason: ${reason}`,
         )
       } catch (e) {
         logger.error(

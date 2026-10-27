@@ -238,6 +238,37 @@ export const liquidationEvents = sqliteTable('liquidation_events', {
   execution: text('execution').notNull(),
 })
 
+/**
+ * Fills of the 'hyperliquid' cost model against an `l2Book` snapshot
+ * (Task 006I-5): one row per order, with the snapshot it used.
+ */
+export const bookFills = sqliteTable('book_fills', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  orderId: integer('order_id').notNull(),
+  accountId: integer('account_id').notNull(),
+  symbol: text('symbol').notNull(),
+  /** 'buy' (fills on the asks) or 'sell' (on the bids). */
+  bookSide: text('book_side').notNull(),
+  /** Size sent to the book (after lot rounding). */
+  requestedQuantity: real('requested_quantity').notNull(),
+  filledQuantity: real('filled_quantity').notNull(),
+  /** Volume-weighted average fill price. */
+  avgPrice: real('avg_price').notNull(),
+  notional: real('notional').notNull(),
+  bestBid: real('best_bid').notNull(),
+  bestAsk: real('best_ask').notNull(),
+  mid: real('mid').notNull(),
+  /** IOC limit price (market order slippage bound); null for liquidations. */
+  limitPrice: real('limit_price'),
+  /** Snapshot time from Hyperliquid and local receipt time, ms since epoch. */
+  bookTime: integer('book_time').notNull(),
+  receivedAt: integer('received_at').notNull(),
+  /** JSON [{ px, sz }] of the levels taken. */
+  levels: text('levels').notNull(),
+  /** 'filled' or 'partial' (IOC: the rest is cancelled). */
+  status: text('status').notNull(),
+})
+
 /** Oracle prices captured live right after each funding hour (Task 006I-2). */
 export const fundingOraclePrices = sqliteTable('funding_oracle_prices', {
   fundingTime: integer('funding_time').notNull(),

@@ -220,9 +220,10 @@ test('5. mark decides, mid executes; the original rule keeps using the mid', asy
   await monitor()
   assert.equal(position(a, 'ETH')!.quantity, 0, 'liquidated on the mark')
   assert.ok(2170 < mStar)
-  assert.equal(fills(a).at(-1)!.price, 2300, 'closed at the mid (no bid/ask yet)')
+  // the stub's default book is a zero-spread book at the mid: the fill is at 2300 (book execution: bookExecution.test.ts)
+  assert.equal(fills(a).at(-1)!.price, 2300, 'closed on the book at 2300, not at the mark 2170')
   assert.deepEqual(JSON.parse(events(a)[0]!.marks), { ETH: 2170 })
-  assert.match(events(a)[0]!.execution, /mid/)
+  assert.match(events(a)[0]!.execution, /l2Book snapshot/)
 
   const b = newAccount()
   await fill(b, 'ETH', 'LONG', 3.75, 10, 2400)

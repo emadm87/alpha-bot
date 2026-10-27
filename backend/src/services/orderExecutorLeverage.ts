@@ -7,6 +7,7 @@ import { and, eq } from 'drizzle-orm'
 import { db } from '../db/client.js'
 import {
   accounts,
+  bookFills,
   orders,
   positions,
   trades,
@@ -19,6 +20,7 @@ import {
   type Position,
 } from '../db/schema.js'
 import { positionMargin } from './assetCalculator.js'
+import type { BookFill, BookSide, BookSnapshot } from './hyperliquidBook.js'
 import { getLastPrice } from './marketData.js'
 import { dbDateMs, utcNow } from '../utils/datetime.js'
 
@@ -119,12 +121,6 @@ export async function placeAndExecuteCrypto(params: {
     throw new Error(`Quantity must be >= ${CRYPTO_MIN_ORDER_QUANTITY}`)
   }
 
-  // Get execution price (await outside the transaction — no I/O inside it)
-  const execPrice =
-    orderType === 'LIMIT' && price
-      ? price
-      : await getLastPrice(symbol, 'CRYPTO')
-
   // The cost model never changes, so the caller's row is enough to read it
   const hyperliquidModel = account.costModel === 'hyperliquid'
   const held = hyperliquidModel
@@ -132,30 +128,57 @@ export async function placeAndExecuteCrypto(params: {
       .where(and(eq(positions.accountId, account.id), eq(positions.symbol, symbol), eq(positions.market, 'CRYPTO'))).get()
     : undefined
 
-  // 'hyperliquid' model (Task 006I-4): the size is rounded down to the market's
-  // lot (szDecimals from meta) and an order worth less than 10 USD is refused
-  // (MinTradeNtl), as the exchange would. Exempt: a close of the whole
-  // position (third-party docs report full reduce-only closes as allowed below
-  // 10 USD; the official page lists no exception) and liquidations, which the
-  // exchange runs itself. Without valid szDecimals opens and partial closes
-  // are refused; full closes and liquidations stay possible.
+  // Execution price and size (awaits outside the transaction — no I/O inside it).
+  // 'original': the last (mid) price, or the limit price, for the size asked.
+  // 'hyperliquid' (Tasks 006I-4/5): the size is rounded down to the market's
+  // lot (szDecimals from meta), then filled against an l2Book snapshot as an
+  // IOC market order: buys take the asks, sells the bids, at the volume-
+  // weighted price of the levels taken; what the book cannot fill is not
+  // filled. An order worth less than 10 USD is refused (MinTradeNtl). Exempt
+  // from lot and minimum: a close of the whole position (third-party docs
+  // report full reduce-only closes as allowed below 10 USD; the official page
+  // lists no exception) and liquidations, which the exchange runs itself and
+  // which take the visible levels without the slippage bound. Without valid
+  // szDecimals opens and partial closes are refused; without a valid, fresh
+  // book nothing is executed.
   let quantity = requestedQuantity
-  if (hyperliquidModel) {
+  let execPrice: number
+  let bookExecution: { book: BookSnapshot; fill: BookFill } | null = null
+  if (!hyperliquidModel) {
+    execPrice = orderType === 'LIMIT' && price ? price : await getLastPrice(symbol, 'CRYPTO')
+  } else {
+    if (orderType !== 'MARKET') throw new Error(`Hyperliquid order refused: ${orderType} orders are not modelled, only MARKET (IOC)`)
     const fullClose = isClose && !!held?.side && held.quantity > 0 && Math.abs(requestedQuantity - held.quantity) <= 1e-12
     const liquidation = orderNo.startsWith('LIQ-')
-    if (!fullClose && !liquidation) {
-      const { floorToLot, hyperliquidSizeDecimals, HL_MIN_ORDER_NOTIONAL } = await import('./hyperliquidMarket.js')
+    const exempt = fullClose || liquidation
+    const { floorToLot, hyperliquidSizeDecimals, HL_MIN_ORDER_NOTIONAL } = await import('./hyperliquidMarket.js')
+    if (!exempt) {
       const rule = await hyperliquidSizeDecimals(symbol)
       if ('error' in rule) throw new Error(`Hyperliquid order refused: ${rule.error}`)
       quantity = floorToLot(requestedQuantity, rule.szDecimals)
       if (quantity <= 0) {
         throw new Error(`Hyperliquid order refused: size ${requestedQuantity} ${symbol} below the lot ${10 ** -rule.szDecimals} (szDecimals ${rule.szDecimals})`)
       }
-      const value = quantity * execPrice
+    }
+    const { fetchBook, walkBook, marketLimitPrice } = await import('./hyperliquidBook.js')
+    const book = await fetchBook(symbol)
+    if ('error' in book) throw new Error(`Hyperliquid order refused: ${book.error}`)
+    const bookSide: BookSide = side === 'LONG' || side === 'BUY' ? 'buy' : 'sell'
+    if (!exempt) {
+      // order value at the best price of the side it takes
+      const reference = bookSide === 'buy' ? book.bestAsk : book.bestBid
+      const value = quantity * reference
       if (value < HL_MIN_ORDER_NOTIONAL) {
-        throw new Error(`Hyperliquid order refused (MinTradeNtl): ${quantity} ${symbol} x ${execPrice} = ${value.toFixed(4)} USD, below the minimum of ${HL_MIN_ORDER_NOTIONAL} USD`)
+        throw new Error(`Hyperliquid order refused (MinTradeNtl): ${quantity} ${symbol} x ${reference} = ${value.toFixed(4)} USD, below the minimum of ${HL_MIN_ORDER_NOTIONAL} USD`)
       }
     }
+    const fill = walkBook(book, bookSide, quantity, liquidation ? null : marketLimitPrice(book, bookSide))
+    if (fill.filled <= 0) {
+      throw new Error(`Hyperliquid order refused: no ${bookSide === 'buy' ? 'ask' : 'bid'} level of the ${symbol} book within ${fill.limitPrice}: nothing filled (IOC)`)
+    }
+    quantity = fill.filled
+    execPrice = fill.avgPrice
+    bookExecution = { book, fill }
   }
 
   const notional = execPrice * quantity
@@ -183,7 +206,8 @@ export async function placeAndExecuteCrypto(params: {
         orderType,
         price: execPrice,
         // requested size; filledQuantity below is the size executed (rounded
-        // to the lot in the 'hyperliquid' model, the same in 'original')
+        // to the lot and filled by the book in the 'hyperliquid' model, the
+        // same in 'original'); price is the average fill price
         quantity: requestedQuantity,
         leverage,
         filledQuantity: 0,
@@ -192,6 +216,29 @@ export async function placeAndExecuteCrypto(params: {
       })
       .returning()
       .get()
+
+    // The book snapshot this fill used, written with the fill (rolled back with it)
+    if (bookExecution) {
+      const { book, fill } = bookExecution
+      tx.insert(bookFills).values({
+        orderId: order.id,
+        accountId: account.id,
+        symbol,
+        bookSide: fill.side,
+        requestedQuantity: fill.requested,
+        filledQuantity: fill.filled,
+        avgPrice: fill.avgPrice,
+        notional: fill.notional,
+        bestBid: book.bestBid,
+        bestAsk: book.bestAsk,
+        mid: book.mid,
+        limitPrice: fill.limitPrice,
+        bookTime: book.time,
+        receivedAt: book.receivedAt,
+        levels: JSON.stringify(fill.levels),
+        status: fill.partial ? 'partial' : 'filled',
+      }).run()
+    }
 
     let pos = tx
       .select()
@@ -476,7 +523,8 @@ export async function placeAndExecuteCrypto(params: {
 
     return tx
       .update(orders)
-      .set({ filledQuantity: quantity, status: 'FILLED' })
+      // IOC: the size the book could not fill is cancelled, not left pending
+      .set({ filledQuantity: quantity, status: bookExecution?.fill.partial ? 'PARTIALLY_FILLED' : 'FILLED' })
       .where(eq(orders.id, order.id))
       .returning()
       .get()

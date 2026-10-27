@@ -177,6 +177,15 @@ class HyperliquidClient {
   }
 
   /**
+   * Raw `l2Book` snapshot of a perpetual: { coin, time, levels: [bids, asks] },
+   * each level { px, sz, n } as strings, best first, at most 20 per side
+   * (Task 006I-5). Errors are thrown.
+   */
+  async getL2Book(coin: string): Promise<unknown> {
+    return this.getExchange().publicPostInfo({ type: 'l2Book', coin })
+  }
+
+  /**
    * Realised hourly funding of a perpetual: rows { coin, fundingRate,
    * premium, time } from the public fundingHistory request, oldest first.
    * Errors are thrown so the caller can retry later.
@@ -314,6 +323,8 @@ export const getCandleSnapshotFromHyperliquid = (
 ) => hyperliquidClient.getCandleSnapshot(coin, interval, startTime, endTime)
 
 export const getMetaFromHyperliquid = () => hyperliquidClient.getMeta()
+
+export const getL2BookFromHyperliquid = (coin: string) => hyperliquidClient.getL2Book(coin)
 
 export const getFundingHistoryFromHyperliquid = (coin: string, startTime: number, endTime: number) =>
   hyperliquidClient.getFundingHistory(coin, startTime, endTime)

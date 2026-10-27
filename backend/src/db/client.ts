@@ -296,6 +296,26 @@ CREATE TABLE IF NOT EXISTS liquidation_events (
 	PRIMARY KEY (id),
 	FOREIGN KEY(account_id) REFERENCES accounts (id)
 );
+CREATE TABLE IF NOT EXISTS book_fills (
+	id INTEGER NOT NULL,
+	order_id INTEGER NOT NULL,
+	account_id INTEGER NOT NULL,
+	symbol VARCHAR(20) NOT NULL,
+	book_side VARCHAR(4) NOT NULL,
+	requested_quantity FLOAT NOT NULL,
+	filled_quantity FLOAT NOT NULL,
+	avg_price FLOAT NOT NULL,
+	notional FLOAT NOT NULL,
+	best_bid FLOAT NOT NULL,
+	best_ask FLOAT NOT NULL,
+	mid FLOAT NOT NULL,
+	limit_price FLOAT,
+	book_time INTEGER NOT NULL,
+	received_at INTEGER NOT NULL,
+	levels TEXT NOT NULL,
+	status VARCHAR(10) NOT NULL,
+	PRIMARY KEY (id)
+);
 CREATE TABLE IF NOT EXISTS funding_oracle_prices (
 	funding_time INTEGER NOT NULL,
 	symbol VARCHAR(20) NOT NULL,

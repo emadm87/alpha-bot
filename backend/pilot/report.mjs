@@ -31,11 +31,12 @@ const MODEL_NOTES = {
     'nessuno sconto), il funding orario (tasso realizzato da fundingHistory x oracle price catturato all\'ora x quantita; ' +
     'nessun interesse dell\'originale), il mark price per P&L non realizzato, equity e margine, il cross margin con le fasce ' +
     'ufficiali (liquidazione quando il valore del conto a mark scende sotto il margine di mantenimento, anche 1x) e la leva ' +
-    'massima per mercato, la precisione degli ordini (quantita arrotondata per difetto al lotto 10^-szDecimals del meta) e il ' +
+    'massima per mercato, l\'esecuzione degli ordini MARKET come IOC sul book l2Book (acquisti sugli ask, vendite sui bid, ' +
+    'prezzo medio ponderato, riempimenti parziali; 006I-5), la precisione degli ordini (quantita arrotondata per difetto al lotto 10^-szDecimals del meta) e il ' +
     'valore minimo di 10 USD per ordine (MinTradeNtl; esenti la chiusura dell\'intera posizione, eccezione riportata da fonti ' +
-    'terze e non dalla pagina ufficiale, e le liquidazioni). NON ancora modellati: esecuzione al bid/ask e slippage (gli ' +
-    'ordini, liquidazioni comprese, si eseguono al mid), precisione dei prezzi (5 cifre significative: irrilevante finche ' +
-    'si esegue al prezzo di mercato), backstop della vault di liquidazione',
+    'terze e non dalla pagina ufficiale, e le liquidazioni). NON ancora modellati: profondita oltre i 20 livelli visibili, ' +
+    'latenza e variazioni del book fra snapshot ed esecuzione, precisione dei prezzi limite (5 cifre significative), ' +
+    'backstop della vault di liquidazione',
 }
 
 export function buildReport({ dbFile, traceFile, accountId: requested, prices, at, priceIn, priceOut }) {
@@ -62,6 +63,10 @@ const hasLiquidationEvents = db.prepare("SELECT 1 FROM sqlite_master WHERE type=
 const liquidationEvents = hasLiquidationEvents
   ? db.prepare('SELECT * FROM liquidation_events WHERE account_id=? ORDER BY triggered_at, id').all(accountId)
   : [] // database precedenti al 006I-3
+const hasBookFills = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='book_fills'").get()
+const bookFillRows = hasBookFills
+  ? db.prepare('SELECT * FROM book_fills WHERE account_id=? ORDER BY id').all(accountId)
+  : [] // database precedenti al 006I-5: esecuzione al mid
 const fundingRows = hasFunding
   ? db.prepare('SELECT * FROM funding_payments WHERE account_id=? ORDER BY funding_time, symbol').all(accountId)
   : [] // database precedenti al 006I-2: nessun funding
@@ -206,7 +211,10 @@ const finalEquity = acc.current_cash + openMargin + unrealized
 const gross = realized + unrealized
 const net = finalEquity - acc.initial_capital // = lordo - commissioni - interessi addebitati + funding netto
 if (Math.abs(net - (gross - fees - interest + fundingNet)) > 1e-6) issues.push('identita netto = lordo - costi non verificata')
-for (const o of orders) if (o.status !== 'FILLED') issues.push(`ordine ${o.id} ${o.status}`)
+// PARTIALLY_FILLED (006I-5): ordine IOC del modello hyperliquid, la parte che il book non poteva eseguire e cancellata
+for (const o of orders) {
+  if (o.status !== 'FILLED' && !(costModel === 'hyperliquid' && o.status === 'PARTIALLY_FILLED')) issues.push(`ordine ${o.id} ${o.status}`)
+}
 if (costModel !== 'hyperliquid' && liquidationEvents.length) issues.push('eventi di liquidazione cross su un conto non hyperliquid')
 const liqOrders = new Set(trades.filter((t) => t.order_no.startsWith('LIQ-')).map((t) => t.order_no))
 for (const e of liquidationEvents) {
@@ -232,6 +240,21 @@ for (const x of series.filter((x) => x.ts)) {
 // --- decisioni ------------------------------------------------------------------------
 const ops = decisions.reduce((m, d) => { const k = `${d.operation || '(vuota)'}${d.executed === 'true' ? '' : ' non eseguita'}`; m[k] = (m[k] ?? 0) + 1; return m }, {})
 const outcomes = trace.filter((e) => e.event === 'outcome').reduce((m, o) => ((m[o.status] = (m[o.status] ?? 0) + 1), m), {})
+// Modello hyperliquid (006I-5): esecuzione sul book. Costo rispetto al mid dello snapshot =
+// (prezzo medio - mid) x quantita per gli acquisti, (mid - prezzo medio) x quantita per le vendite;
+// meta spread = (ask - bid) / 2 x quantita; impatto di profondita = costo - meta spread.
+const bookCosts = bookFillRows.map((f) => {
+  const sign = f.book_side === 'buy' ? 1 : -1
+  const costVsMid = sign * (f.avg_price - f.mid) * f.filled_quantity
+  const halfSpread = ((f.best_ask - f.best_bid) / 2) * f.filled_quantity
+  return {
+    order_id: f.order_id, symbol: f.symbol, side: f.book_side, requested: f.requested_quantity, filled: f.filled_quantity,
+    avg_price: f.avg_price, mid: f.mid, best_bid: f.best_bid, best_ask: f.best_ask,
+    spread_bps: (f.best_ask - f.best_bid) / f.mid * 10_000, cost_vs_mid: costVsMid, half_spread_cost: halfSpread,
+    depth_impact: costVsMid - halfSpread, levels: JSON.parse(f.levels).length, status: f.status,
+    book_time: new Date(f.book_time).toISOString(), book_age_ms: f.received_at - f.book_time, limit_price: f.limit_price,
+  }
+})
 // Modello hyperliquid (006I-4): quantita richiesta e eseguita per ordine; gli ordini rifiutati non
 // lasciano righe nel database e si leggono dalla traccia (esito execution_failed)
 const sizedOrders = orders.filter((o) => o.status === 'FILLED' && Math.abs(o.quantity - o.filled_quantity) > 1e-12)
@@ -281,9 +304,31 @@ return {
         order_sizes: {
           rule: 'quantita arrotondata per difetto al lotto 10^-szDecimals; ordine sotto 10 USD rifiutato (MinTradeNtl), ' +
             'esenti chiusura dell\'intera posizione e liquidazioni; senza szDecimals valido rifiutate aperture e chiusure parziali',
-          filled_orders: orders.filter((o) => o.status === 'FILLED').length,
+          filled_orders: orders.filter((o) => o.status === 'FILLED' || o.status === 'PARTIALLY_FILLED').length,
           rounded: sizedOrders.map((o) => ({ order_no: o.order_no, symbol: o.symbol, side: o.side, requested: o.quantity, executed: o.filled_quantity })),
           refused: refusedOrders.map((e) => ({ at: e.ts, detail: e.detail })),
+        },
+      }
+    : {}),
+  // Esecuzione sul book Hyperliquid (006I-5); assente nei report del modello originale
+  ...(costModel === 'hyperliquid'
+    ? {
+        execution: {
+          rule: 'ordini MARKET come IOC su uno snapshot l2Book (massimo 20 livelli per lato, eta massima 10 s): acquisti sugli ask, ' +
+            'vendite sui bid, prezzo medio ponderato sui livelli presi; ordini AI entro mid +/- 5% (slippage predefinito dell\'SDK ' +
+            'Python ufficiale), liquidazioni senza limite; la parte non coperta dal book visibile non viene eseguita',
+          book_fills: bookCosts.length,
+          partial_fills: bookCosts.filter((c) => c.status === 'partial').length,
+          fills_without_book: trades.filter((t) => !bookFillRows.some((f) => f.order_id === t.order_id)).length,
+          cost_vs_mid_usdc: r(bookCosts.reduce((a, c) => a + c.cost_vs_mid, 0), 6),
+          half_spread_cost_usdc: r(bookCosts.reduce((a, c) => a + c.half_spread_cost, 0), 6),
+          depth_impact_usdc: r(bookCosts.reduce((a, c) => a + c.depth_impact, 0), 6),
+          note: 'costi gia inclusi nel P&L realizzato e nell\'equity (prezzi di esecuzione reali della simulazione); separati qui solo ' +
+            'per lettura. fills_without_book: fill precedenti al 006I-5, eseguiti al mid',
+          fills: bookCosts.map((c) => ({
+            ...c, avg_price: r(c.avg_price, 8), mid: r(c.mid, 8), spread_bps: r(c.spread_bps, 4),
+            cost_vs_mid: r(c.cost_vs_mid, 6), half_spread_cost: r(c.half_spread_cost, 6), depth_impact: r(c.depth_impact, 6),
+          })),
         },
       }
     : {}),
@@ -324,7 +369,10 @@ return {
       (costModel === 'hyperliquid'
         ? 'funding delle ore gia regolate incluso nell\'equity, nessun funding per l\'ora in corso (si paga solo allo scoccare dell\'ora); '
         : `interessi maturati a ${r(RATE_H * 100, 6)}%/h sulla parte a prestito; `) +
-      'nessuno spread, slippage o impatto di prezzo',
+      (costModel === 'hyperliquid'
+        ? 'STIMA ai prezzi finali (mid), non un\'esecuzione verificata sul book: spread e profondita di chiusura non inclusi ' +
+          '(il report non legge il book; le esecuzioni registrate li includono)'
+        : 'nessuno spread, slippage o impatto di prezzo'),
     funding_not_settled_intervals: fundingStatus.missing_oracle + fundingStatus.missing_rate + fundingNotRecorded,
     open_positions: positions.length,
     complete: closingComplete,
