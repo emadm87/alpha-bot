@@ -118,8 +118,21 @@ function round6(value: number): number {
   return Number(value.toFixed(6))
 }
 
+/**
+ * AI cycles can start while another is still running: the 300 s job, the
+ * immediate run after each account save (resetAutoTradingJob) and the startup
+ * run do not share the job's in-flight flag. An account is therefore taken by
+ * one cycle at a time, and a cycle skips an account that a cycle started
+ * after it has already served, so each account gets one decision per start.
+ */
+const accountsInCycle = new Set<number>()
+/** Account id -> number of the latest cycle that took it. */
+const accountLastCycle = new Map<number, number>()
+let cycleCount = 0
+
 /** Place crypto orders based on AI model decisions for all active accounts. */
 export async function placeAIDrivenCryptoOrder(): Promise<void> {
+  const cycle = ++cycleCount
   try {
     const activeAccounts = getActiveAIAccounts()
     if (activeAccounts.length === 0) {
@@ -135,6 +148,16 @@ export async function placeAIDrivenCryptoOrder(): Promise<void> {
     }
 
     for (const account of activeAccounts) {
+      if (accountsInCycle.has(account.id)) {
+        logger.info(`AI cycle already running for account ${account.name}, skipping`)
+        continue
+      }
+      if ((accountLastCycle.get(account.id) ?? 0) > cycle) {
+        logger.info(`Account ${account.name} already served by a newer AI cycle, skipping`)
+        continue
+      }
+      accountsInCycle.add(account.id)
+      accountLastCycle.set(account.id, cycle)
       try {
         logger.info(`Processing AI trading for account: ${account.name}`)
 
@@ -369,6 +392,8 @@ export async function placeAIDrivenCryptoOrder(): Promise<void> {
           `AI-driven order placement failed for account ${account.name}: ${accountErr}`,
         )
         // Continue with next account even if one fails
+      } finally {
+        accountsInCycle.delete(account.id)
       }
     }
   } catch (err) {
