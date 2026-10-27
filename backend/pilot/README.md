@@ -174,6 +174,11 @@ Contiene:
 - capitale iniziale e finale;
 - P&L lordo, netto, realizzato e non realizzato, in USDC e %;
 - commissioni e interessi addebitati, e a parte quelli maturati ma non addebitati;
+- `if_closed`, separato dal risultato registrato: commissione stimata per chiudere ogni posizione
+  aperta al prezzo finale (commissione taker del motore), interessi maturati non addebitati, P&L netto
+  ed equity finale ipotetici dopo la chiusura, in USDC e %. È una stima: nessuno spread, slippage,
+  impatto di prezzo o funding; senza un prezzo finale per ogni posizione aperta resta vuota
+  (`complete: false`);
 - aperture e chiusure LONG/SHORT, HOLD;
 - chiusure e posizioni vincenti e perdenti;
 - liquidazioni (`LIQ-`);
@@ -182,6 +187,9 @@ Contiene:
 - benchmark HOLD e BTC compra-e-tieni 1x;
 - token e costo AI;
 - anomalie.
+
+Commissione e tasso d'interesse sono letti da `src/db/schema.ts` (`CRYPTO_TAKER_FEE_RATE`,
+`CRYPTO_INTEREST_RATE_HOURLY`): il report usa sempre le regole del motore.
 
 Riconciliazione, con ogni costo contato una sola volta:
 `cassa = capitale + P&L realizzato − commissioni − interessi − margine delle posizioni aperte`.

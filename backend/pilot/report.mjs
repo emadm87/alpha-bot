@@ -4,15 +4,23 @@
 //                                [--price-in USD_per_1M] [--price-out USD_per_1M]
 // Modulo: buildReport({ dbFile, traceFile, accountId, prices, at, priceIn, priceOut }).
 // Nessuna rete, nessuna scrittura: il database e aperto in readonly. Non usa la curva della dashboard.
-// Costanti del motore attuale (src/db/schema.ts): commissione 0,07%, interessi 0,00125%/h.
+// Commissione e tasso d'interesse sono letti dalle costanti del motore in src/db/schema.ts
+// (lo script gira con node, senza tsx, quindi il file TypeScript e letto come testo).
 import fs from 'node:fs'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 const require = createRequire(new URL('../package.json', import.meta.url))
 const Database = require('better-sqlite3')
 
-const FEE = 0.0007
-const RATE_H = 0.0000125
+/** Valore numerico di `export const NAME = ...` in src/db/schema.ts; errore se manca. */
+export function engineConstant(name, schemaText = fs.readFileSync(new URL('../src/db/schema.ts', import.meta.url), 'utf8')) {
+  const m = schemaText.match(new RegExp(`^export const ${name} = ([0-9.eE+-]+)\\s*$`, 'm'))
+  const value = m ? Number(m[1]) : NaN
+  if (!Number.isFinite(value)) throw new Error(`costante ${name} non trovata in src/db/schema.ts`)
+  return value
+}
+const FEE = engineConstant('CRYPTO_TAKER_FEE_RATE') // commissione taker del motore (apertura e chiusura)
+const RATE_H = engineConstant('CRYPTO_INTEREST_RATE_HOURLY') // interessi orari sulla parte presa a prestito
 
 export function buildReport({ dbFile, traceFile, accountId: requested, prices, at, priceIn, priceOut }) {
 const db = new Database(dbFile, { readonly: true, fileMustExist: true })
@@ -76,6 +84,10 @@ for (const t of trades) {
 
 // --- confronto con le posizioni registrate ----------------------------------------------
 let unrealized = 0, openMargin = 0, accrued = 0
+// chiusura ipotetica: per ogni posizione aperta la commissione del motore al prezzo finale
+// e gli interessi maturati dall'ultimo addebito (calculatePositionInterest), nient'altro
+const closing = []
+let closingComplete = true
 for (const p of positions) {
   const b = book[p.symbol]
   if (!p.side) issues.push(`${p.symbol}: riga SPOT aperta (fuori dal perimetro)`)
@@ -84,13 +96,24 @@ for (const p of positions) {
   }
   if (p.margin === null) issues.push(`${p.symbol}: margine non registrato`)
   openMargin += p.margin ?? (p.quantity * p.avg_cost) / Math.max(p.leverage, 1)
-  const price = finalPrices?.[p.symbol]
-  if (!(price > 0)) { issues.push(`${p.symbol}: prezzo finale mancante, PnL non realizzato escluso`); continue }
-  unrealized += (p.side === 'SHORT' ? -1 : 1) * p.quantity * (price - p.avg_cost)
+  // interessi maturati non addebitati: stessa formula del motore, margine ricostruito come
+  // positionMargin quando la riga non lo registra
+  let positionAccrued = 0
   if (p.leverage > 1 && p.last_interest_time) {
     const hours = (Date.parse(asOf) - dbMs(p.last_interest_time)) / 3_600_000
-    accrued += Math.max(p.quantity * p.avg_cost - (p.margin ?? 0), 0) * RATE_H * Math.max(hours, 0)
+    const margin = p.margin ?? (p.quantity * p.avg_cost) / p.leverage
+    positionAccrued = Math.max(p.quantity * p.avg_cost - margin, 0) * RATE_H * Math.max(hours, 0)
+    accrued += positionAccrued
   }
+  const price = finalPrices?.[p.symbol]
+  if (!(price > 0)) {
+    issues.push(`${p.symbol}: prezzo finale mancante, PnL non realizzato escluso`)
+    closingComplete = false
+    closing.push({ symbol: p.symbol, side: p.side, quantity: p.quantity, price: null, closing_fee: null, accrued_interest: positionAccrued })
+    continue
+  }
+  unrealized += (p.side === 'SHORT' ? -1 : 1) * p.quantity * (price - p.avg_cost)
+  closing.push({ symbol: p.symbol, side: p.side, quantity: p.quantity, price, closing_fee: p.quantity * price * FEE, accrued_interest: positionAccrued })
 }
 for (const [s, b] of Object.entries(book)) {
   if (b.qty > 0 && !positions.some((p) => p.symbol === s)) issues.push(`${s}: fill aperti senza riga di posizione`)
@@ -141,6 +164,13 @@ usage.cost_usd = Number.isFinite(inPrice) && Number.isFinite(outPrice) ? (usage.
 const p0 = prompts[0]?.prices?.BTC, p1 = finalPrices?.BTC
 const btcBH = p0 > 0 && p1 > 0 ? (acc.initial_capital / (1 + FEE)) * (p1 / p0) * (1 - FEE) : null
 
+// --- chiusura ipotetica: equity registrata - commissioni di chiusura - interessi maturati -----------
+// Le commissioni e gli interessi gia addebitati sono nella cassa (quindi nell'equity) e non si
+// ripetono; il P&L non realizzato diventa realizzato allo stesso prezzo finale.
+const closingFees = closing.reduce((t, c) => t + (c.closing_fee ?? 0), 0)
+const finalIfClosed = closingComplete ? finalEquity - closingFees - accrued : null
+const netIfClosed = closingComplete ? finalIfClosed - acc.initial_capital : null
+
 const r = (x, d = 4) => (x === null || x === undefined || !Number.isFinite(x) ? null : Number(x.toFixed(d)))
 const pct = (x) => r((x / acc.initial_capital) * 100, 4)
 return {
@@ -151,6 +181,20 @@ return {
     gross_usdc: r(gross), gross_pct: pct(gross), realized: r(realized), unrealized: r(unrealized),
     fees: r(fees), interest_charged: r(interest), net_usdc: r(net), net_pct: pct(net),
     accrued_interest_not_charged: r(accrued, 6), net_after_accrued_usdc: r(net - accrued),
+  },
+  // Stima, non un risultato registrato: tutte le posizioni aperte chiuse ai prezzi finali.
+  if_closed: {
+    basis: `chiusura ipotetica di ${positions.length} posizioni aperte ai prezzi finali (${prices ? 'argomento' : 'ultimo prompt'}) alle ${asOf}; ` +
+      `commissione taker del motore ${r(FEE * 100, 4)}% sul nozionale di uscita, interessi maturati a ${r(RATE_H * 100, 6)}%/h sulla parte a prestito; ` +
+      'nessuno spread, slippage, impatto di prezzo o funding',
+    open_positions: positions.length,
+    complete: closingComplete,
+    closing_fees_estimated: r(closingFees, 6),
+    accrued_interest_not_charged: r(accrued, 6),
+    final_equity_usdc: r(finalIfClosed),
+    net_usdc: r(netIfClosed),
+    net_pct: netIfClosed === null ? null : pct(netIfClosed),
+    positions: closing.map((c) => ({ ...c, closing_fee: r(c.closing_fee, 6), accrued_interest: r(c.accrued_interest, 6) })),
   },
   operations: {
     opens: { LONG: count.LONG, SHORT: count.SHORT }, closes: { LONG: count.close_long, SHORT: count.close_short },

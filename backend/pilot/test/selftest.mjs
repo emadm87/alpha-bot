@@ -73,6 +73,13 @@ await step('report: valori attesi e riconciliazione', () => {
   near(rep.pnl.fees, 0.3164, 'commissioni')
   near(rep.pnl.interest_charged, 0.0079, 'interessi')
   near(rep.pnl.net_usdc, 7.6757, 'netto')
+  // chiusura ipotetica: BTC LONG 0,3 ancora aperto a 120 -> commissione 0,3 * 120 * 0,07% = 0,0252;
+  // interessi maturati 0 (ultimo addebito dopo la data del report)
+  near(rep.if_closed.closing_fees_estimated, 0.0252, 'commissione di chiusura stimata')
+  near(rep.if_closed.accrued_interest_not_charged, 0, 'interessi maturati')
+  near(rep.if_closed.net_usdc, 7.6505, 'netto se chiuso')
+  near(rep.if_closed.final_equity_usdc, 1007.6505, 'equity se chiuso')
+  assert.equal(rep.if_closed.complete, true)
   near(rep.risk.max_drawdown_pct, 1.2961, 'drawdown')
   assert.equal(rep.operations.liquidations, 1)
   assert.deepEqual(rep.operations.opens, { LONG: 2, SHORT: 1 })
