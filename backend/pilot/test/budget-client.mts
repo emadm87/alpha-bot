@@ -2,6 +2,8 @@
 // con ai-budget.mjs caricato: i retry del client devono consumare il budget. Nessuna rete esterna.
 // Uso: AI_BUDGET_HOST=127.0.0.1 AI_BUDGET_MAX=N AI_BUDGET_FILE=... NODE_OPTIONS=--import <ai-budget> \
 //      node --import tsx pilot/test/budget-client.mts <cicli>
+// TEST_ACCOUNT_KEY: chiave salvata nel conto (default test-placeholder-key); TEST_AUTH_LOG: file in cui il
+// server registra l'intestazione Authorization ricevuta (test di key-inject.mjs, 006J-4B).
 import fs from 'node:fs'
 import http from 'node:http'
 import os from 'node:os'
@@ -12,6 +14,7 @@ process.env.DATABASE_PATH = path.join(dir, 't.db')
 process.env.LOG_LEVEL = 'error'
 const srv = http.createServer((req, res) => {
   if (req.url?.startsWith('/rss')) return res.end('')
+  if (process.env.TEST_AUTH_LOG) fs.appendFileSync(process.env.TEST_AUTH_LOG, `${req.headers.authorization ?? ''}\n`)
   res.writeHead(429, { 'Content-Type': 'application/json' })
   res.end('{"error":"rate limited"}')
 }).listen(0, '127.0.0.1')
@@ -25,7 +28,7 @@ globalThis.fetch = ((input: any, init?: any) => {
   return realFetch(input, init)
 }) as typeof fetch
 const { callAIForDecision } = await import('../../src/services/aiDecision.js')
-const account = { id: 1, name: 't', apiKey: 'test-placeholder-key', model: 'm', baseUrl: `http://127.0.0.1:${port}/v1beta/openai` } as any
+const account = { id: 1, name: 't', apiKey: process.env.TEST_ACCOUNT_KEY ?? 'test-placeholder-key', model: 'm', baseUrl: `http://127.0.0.1:${port}/v1beta/openai` } as any
 const portfolio = { cash: 1000, frozen_cash: 0, total_assets: 1000, positions: {} } as any
 const cycles = Number(process.argv[2] ?? 1)
 const decisions = []

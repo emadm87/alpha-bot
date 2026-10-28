@@ -1,7 +1,7 @@
 # Pilota AI forward — ALPHA BOT
 
 Strumenti per la prima prova forward dell'AI originale con **1.000 USDC simulati**.
-Preflight completato nel Task 006G-6D; **la simulazione non è ancora stata eseguita**.
+Preflight nel Task 006G-6D; piloti da 12 cicli eseguiti (006G-7, 006J-1, 006J-3); prova da 24 h non ancora eseguita.
 
 > ⚠️ `run-pilot.mjs --authorized` avvia l'app e fa **chiamate AI a pagamento**.
 > Usarlo solo dopo un'autorizzazione esplicita, separata per il pilota (12 cicli) e per la prova da 24 h.
@@ -19,6 +19,8 @@ Gli script non modificano codice, prompt, strategie, sizing, leva, monitor o liq
 | `report.mjs` | Report economico dal database (aperto in sola lettura) e dalla traccia |
 | `compare.mjs` | Confronto a posteriori Originale vs Hyperliquid sugli stessi fill (sezione `comparison` del report, 006I-6) |
 | `ccxt-proxy.mjs` | Shim di trasporto: aggiunge solo `httpsProxy` a ccxt (serve solo con proxy HTTPS obbligatorio) |
+| `hl-guard.mjs` | Sorveglianza Hyperliquid (429, monitor cross margin, funding, riconciliazione): arresto automatico dal launcher e stato da CLI (006J-4B) |
+| `key-inject.mjs` | Preload: inserisce la chiave AI solo nelle richieste verso l'host AI; il database contiene solo il segnaposto (006J-4B) |
 | `test/selftest.mjs` | Verifica offline di tutti gli script (nessuna rete, nessuna AI) |
 | `test/build-synthetic.mts` | Database SINTETICO generato dal motore reale, solo per i test |
 | `test/fake-backend.mjs` | Finto backend per testare il launcher, solo per i test |
@@ -56,9 +58,21 @@ chiave: il conto usa il segnaposto `network-secret-placeholder` (default `--key-
 quindi la chiave non entra mai in database, log o traccia.
 
 **PC di casa (nessun proxy).** Il Network Secret non esiste: la chiave va passata in una variabile
-d'ambiente e il launcher la mette nel conto (`--key-mode env --key-env GEMINI_API_KEY`).
-La chiave resta nel database della prova solo durante l'esecuzione: a fine prova il launcher la
-sostituisce con `redacted-after-run`. La traccia 006B la maschera sempre.
+d'ambiente (`--key-mode env --key-env GEMINI_API_KEY`). Dal 006J-4B il conto riceve **solo il segnaposto**,
+come nel cloud: il preload `key-inject.mjs`, caricato dal launcher nel processo dell'app, aggiunge la chiave
+alle sole richieste HTTPS verso l'host di `--base-url` e la rimuove dall'ambiente dell'app. La chiave non
+viene mai scritta nel database, nel log o nella traccia, quindi anche dopo un crash o un'interruzione di
+corrente non c'e nulla da cancellare nei file della prova (verificato nel selftest con l'arresto brusco di
+launcher e app). Resta nella memoria dei processi e, come ogni dato in memoria, puo finire nel file di
+paging o di ibernazione di Windows: fuori dal controllo del pilota. Se la riga `[key-inject] attivo` manca
+nel log all'avvio, il launcher si ferma prima di creare il conto.
+
+Database di prove precedenti al 006J-4B interrotte senza arresto controllato: la chiave puo essere rimasta
+nel conto. Pulizia (da `backend/`, PowerShell o bash):
+
+```powershell
+node -e "const D=require('better-sqlite3');const d=new D(process.argv[1],{timeout:5000});const r=d.prepare('UPDATE accounts SET api_key=? WHERE name LIKE ?').run('redacted-after-run','pilot-%');console.log('righe:',r.changes);d.close()" "pilot\runs\<cartella>\pilot.db"
+```
 
 ```powershell
 # Windows PowerShell 7+: chiave solo per la sessione corrente, mai salvata in file
@@ -101,8 +115,9 @@ immutabile, quindi una prova non mescola mai due modelli:
   realizzato e margine sono a **mark price**; la liquidazione segue il **cross margin** di Hyperliquid
   (valore del conto a mark sotto la somma dei margini di mantenimento delle fasce ufficiali, anche 1x)
   e le aperture sopra la leva massima del mercato (da `meta`) sono rifiutate. Senza mark price valido
-  e recente o senza tabelle di margine non si liquida nulla. Non ancora modellati: esecuzione al
-  bid/ask (ordini e liquidazioni si eseguono al mid), precisione degli ordini, backstop della vault.
+  e recente o senza tabelle di margine non si liquida nulla. Ordini e liquidazioni si eseguono come IOC
+  sul book `l2Book` (006I-5), con la precisione e il minimo di 10 USD di Hyperliquid (006I-4). Non
+  modellato: backstop della vault di liquidazione.
 
 Il launcher invia il modello alla creazione del conto e si ferma se l'app risponde con un altro
 modello. Fuori dal launcher lo stesso valore si può dare con la variabile `ALPHA_COST_MODEL` (usata
@@ -159,12 +174,32 @@ Automatico quando si verifica una di queste condizioni:
 - 3 cicli consecutivi senza decisione o con esecuzione fallita;
 - errore 401/403/404, chiamate duplicate (meno di 240 s), chiave nel log o nella traccia;
 - reset dello scheduler fallito, ordini manuali, nessuna chiamata AI entro 6 minuti dalla creazione del conto;
-- timeout (`--timeout-min`, default 62).
+- timeout (`--timeout-min`, default 62);
+- **sorveglianza Hyperliquid** (`hl-guard.mjs`, dal 006J-4B; `--guard off` la disattiva), a ogni controllo:
+  - posizione aperta (conto `hyperliquid`) e monitor cross margin senza valutazioni da oltre 5 minuti
+    (episodio `not evaluated` senza `evaluated again`, oppure nessun prezzo aggiornato da 5 minuti);
+  - HTTP 429 di Hyperliquid persistenti (almeno 2 senza prezzi validi per oltre 10 minuti) o piu di 30
+    nell'ultima ora (le righe di uno stesso 429 contano una volta; i 429 di Gemini sono esclusi);
+  - funding non regolato per 3 ore consecutive con posizione aperta (un'ora senza riga conta dopo 60 minuti);
+  - riconciliazione contabile errata in 2 controlli consecutivi (ogni `--recon-ms`, default 2 minuti),
+    oppure non verificabile (errore di lettura) in 5 controlli di fila;
+  - sorveglianza che non riesce a leggere log e database per 20 controlli di fila (~5 minuti).
+
+  Sono solo avvisi (salvati in `run-meta.json` alla voce `guard`): un 429 isolato o seguito da prezzi
+  validi, un controllo del monitor saltato e recuperato entro 5 minuti, una o due ore di funding non
+  regolate, una riconciliazione errata isolata, un errore temporaneo di lettura del database.
+
+Stato in qualunque momento, da un'altra finestra (sola lettura; 0 = nessun problema bloccante, 2 = bloccante):
+
+```bash
+node pilot/hl-guard.mjs pilot/runs/<cartella>
+```
 
 Arresto manuale, su qualunque sistema:
 
 - **file `STOP`** nella cartella della prova (consigliato, anche da un altro terminale):
-  `type nul > pilot\runs\<cartella>\STOP` su Windows, `touch pilot/runs/<cartella>/STOP` altrove;
+  `New-Item -ItemType File pilot\runs\<cartella>\STOP` in PowerShell (`type nul > ...` vale solo nel
+  Prompt dei comandi), `touch pilot/runs/<cartella>/STOP` altrove;
 - **`Ctrl+C`** nel terminale del launcher.
 
 Entrambi fermano l'app, salvano `run-meta.json`, `check.json` e `report.json` e, con `--key-mode env`,
@@ -237,9 +272,12 @@ La cartella della prova contiene `pilot.db`, `backend.log`, `trace.jsonl`, `run-
 
 ## Limiti dichiarati della prova
 
-- Il monitor operativo è quello originale (equity/marginUsed < 0,5), non Hyperliquid. Le posizioni 1x,
-  SHORT compreso, non sono monitorate.
-- Interessi dell'autore (0,00125%/h) al posto del funding Hyperliquid.
-- Commissione 0,07% senza slippage né spread, esecuzione all'ultimo prezzo (cache 30 s).
+- Modello `original` (default): monitor originale (equity/marginUsed < 0,5; posizioni 1x, SHORT compreso,
+  non monitorate), interessi dell'autore (0,00125%/h), commissione 0,07% senza slippage né spread,
+  esecuzione all'ultimo prezzo (cache 30 s).
+- Modello `hyperliquid`: regole e limiti descritti nella sezione 3 e nella nota `cost_model` del report
+  (backstop della vault di liquidazione non riprodotto; funding non regolato se l'app era ferma all'ora).
 - Un prezzo mancante salta il ciclo; nell'equity il PnL di quel simbolo vale 0 per quel momento.
 - 12 cicli verificano pipeline e contabilità, non la redditività.
+- La sorveglianza Hyperliquid legge le righe di log introdotte nel 006J-2 (`evaluated again after N
+  skipped checks`): su log di versioni precedenti un controllo saltato e poi recuperato resta "aperto".

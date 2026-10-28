@@ -12,6 +12,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createRequire } from 'node:module'
 import { evaluateRun } from '../check-run.mjs'
 import { buildReport } from '../report.mjs'
+import { evaluateGuard, parseLog, reconciliation, reconciliationTracker } from '../hl-guard.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const pilotDir = path.resolve(here, '..')
@@ -26,6 +27,8 @@ const portFree = (port) => new Promise((resolve) => {
 })
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'alpha-pilot-selftest-'))
 const results = []
+// segnaposto della chiave nel conto (run-pilot.mjs); costruito a pezzi per il controllo finale sulle chiavi
+const PLACEHOLDER = 'network-secret-' + 'placeholder'
 const near = (a, b, what, eps = 1e-3) => assert.ok(Math.abs(a - b) <= eps, `${what}: ${a} vs ${b}`)
 async function step(name, fn) {
   try {
@@ -39,7 +42,7 @@ const sha = (f) => crypto.createHash('sha256').update(fs.readFileSync(f)).digest
 const node = (argv, env = {}) => spawnSync(process.execPath, argv, { cwd: backendDir, env: { ...process.env, ...env }, encoding: 'utf8' })
 
 await step('sintassi degli script', () => {
-  for (const f of ['check-run.mjs', 'report.mjs', 'compare.mjs', 'ccxt-proxy.mjs', 'run-pilot.mjs', 'ai-budget.mjs', 'test/fake-backend.mjs', 'test/selftest.mjs']) {
+  for (const f of ['check-run.mjs', 'report.mjs', 'compare.mjs', 'ccxt-proxy.mjs', 'run-pilot.mjs', 'ai-budget.mjs', 'hl-guard.mjs', 'key-inject.mjs', 'test/fake-backend.mjs', 'test/selftest.mjs']) {
     const r = node(['--check', path.join(pilotDir, f)])
     assert.equal(r.status, 0, `${f}: ${r.stderr}`)
   }
@@ -342,9 +345,253 @@ await step('launcher: file STOP (tutti i sistemi) arresta, salva stato e report,
   const db = new Database(path.join(dir, 'pilot.db'), { readonly: true })
   const keys = db.prepare('SELECT api_key FROM accounts').all().map((r) => r.api_key)
   db.close()
-  assert.deepEqual(keys, ['redacted-after-run'])
+  // 006J-4B: il conto contiene solo il segnaposto, la chiave non e mai stata scritta nel database
+  assert.deepEqual(keys, [PLACEHOLDER])
+  assert.match(fs.readFileSync(path.join(dir, 'backend.log'), 'utf8'), /\[key-inject\] attivo/)
   for (const f of fs.readdirSync(dir)) assert.ok(!fs.readFileSync(path.join(dir, f)).includes(fakeKey), `chiave in ${f}`)
 })
+
+// --- 006J-4B: sorveglianza Hyperliquid (hl-guard.mjs) ---------------------------------------------------
+const NOW = Date.UTC(2026, 9, 28, 12, 0, 0)
+const MIN = 60_000
+const line = (ms, level, name, msg) => `${new Date(ms).toISOString()} ${level.padEnd(7)} ${name}: ${msg}`
+const pricesOk = (ms) => line(ms, 'INFO', 'services.hyperliquid', 'Got prices for BTC/USDC:USDC, ETH/USDC:USDC')
+const hl429 = (ms) => [
+  line(ms, 'ERROR', 'services.hyperliquid', 'Error fetching prices for BTC, ETH: RateLimitExceeded: hyperliquid POST https://api.hyperliquid.xyz/info 429 Too Many Requests null'),
+  line(ms + 1, 'WARNING', 'services.marketData', 'Hyperliquid rate limit (HTTP 429): next price refresh in 5 s'),
+  line(ms + 2, 'ERROR', 'services.marketData', 'Failed to get price from Hyperliquid: RateLimitExceeded: 429 Too Many Requests'),
+]
+const notEval = (ms, reason) => line(ms, 'WARNING', 'services.scheduler', `Hyperliquid margin of account p not evaluated, no liquidation: ${reason}`)
+const evalAgain = (ms, n) => line(ms, 'INFO', 'services.scheduler', `Hyperliquid margin of account p evaluated again after ${n} skipped checks`)
+const everyHalfMinute = (fromMin, toMin = 0) => Array.from({ length: (fromMin - toMin) * 2 + 1 }, (_, i) => pricesOk(NOW - fromMin * MIN + i * 30_000))
+const open = (extra = {}) => ({
+  accountName: 'p', costModel: 'hyperliquid', hasLedger: true, openPositions: [{ symbol: 'BTC', quantity: 0.01 }],
+  trades: [{ symbol: 'BTC', side: 'LONG', quantity: 0.01, taker_fee: 0.36, ms: NOW - 3 * 60 * MIN }],
+  funding: [9, 10, 11].map((h) => ({ symbol: 'BTC', funding_time: Date.UTC(2026, 9, 28, h), status: 'settled' })), ...extra,
+})
+const guard = (lines, data = open(), now = NOW) => evaluateGuard({ lines: parseLog(lines.join('\n')), data, now, accountCreatedMs: NOW - 4 * 60 * MIN })
+
+await step('hl-guard: funzionamento normale con posizione aperta -> nessun arresto, nessun avviso', () => {
+  const r = guard(everyHalfMinute(20))
+  assert.deepEqual(r.stop, [])
+  assert.deepEqual(r.warnings, [])
+  assert.equal(r.stats.hl_429_events_total, 0)
+})
+
+await step('hl-guard: 429 singoli e recuperati -> solo avvisi; le righe di uno stesso 429 contano una volta', () => {
+  const lines = [...everyHalfMinute(20, 11), ...hl429(NOW - 10 * MIN), ...hl429(NOW - 9.5 * MIN), ...everyHalfMinute(9), ...hl429(NOW - 20_000)]
+  const r = guard(lines.sort())
+  assert.deepEqual(r.stop, [])
+  assert.equal(r.stats.hl_429_events_last_hour, 3)
+  assert.ok(r.warnings.some((w) => w.startsWith('HTTP 429 Hyperliquid: 3 eventi')), r.warnings.join('; '))
+  // un 429 del client Gemini non e un 429 Hyperliquid
+  const ai = line(NOW - MIN, 'WARNING', 'services.aiDecision', 'AI API rate limited after 3 attempts: 429 Too Many Requests')
+  assert.equal(guard([...everyHalfMinute(20), ai].sort()).stats.hl_429_events_total, 0)
+})
+
+await step('hl-guard: 429 persistenti oltre 10 min -> arresto; piu di 30 in un ora -> arresto; 30 -> avviso', () => {
+  const flat = open({ openPositions: [], trades: [] })
+  const persistent = [pricesOk(NOW - 12 * MIN), ...Array.from({ length: 23 }, (_, i) => hl429(NOW - 11 * MIN + i * 30_000)).flat()]
+  const p = guard(persistent, flat)
+  assert.ok(p.stop.some((x) => x.startsWith('HTTP 429 Hyperliquid persistenti da 11 min')), p.stop.join('; '))
+  // 9 minuti: non ancora bloccante
+  assert.deepEqual(guard(persistent, flat, NOW - 2 * MIN).stop, [])
+  const burst = (n) => Array.from({ length: n }, (_, i) => [...hl429(NOW - 59 * MIN + i * MIN), pricesOk(NOW - 59 * MIN + i * MIN + 20_000)]).flat()
+  const over = guard(burst(31), flat)
+  assert.ok(over.stop.some((x) => x.includes("31 eventi nell'ultima ora")), over.stop.join('; '))
+  const at = guard(burst(30), flat)
+  assert.deepEqual(at.stop, [])
+  assert.ok(at.warnings.some((w) => w.includes('30 eventi')))
+})
+
+await step('hl-guard: monitor non valutabile oltre 5 min con posizione aperta -> arresto; casi recuperabili senza arresto', () => {
+  const blind = guard([...everyHalfMinute(20), notEval(NOW - 6 * MIN, 'margin tables unavailable')].sort())
+  assert.ok(blind.stop.some((x) => x.startsWith('monitor cross margin senza valutazioni da 6 min')), blind.stop.join('; '))
+  const four = guard([...everyHalfMinute(20), notEval(NOW - 4 * MIN, 'BTC: mark price 61 s old')].sort())
+  assert.deepEqual(four.stop, [])
+  assert.ok(four.warnings.some((w) => w.startsWith('monitor cross margin non valutato da 4 min')))
+  const recovered = guard([...everyHalfMinute(20), notEval(NOW - 10 * MIN, 'BTC: mark price 61 s old'), evalAgain(NOW - 9 * MIN, 12)].sort())
+  assert.deepEqual(recovered.stop, [])
+  assert.equal(recovered.stats.monitor_skipped_then_recovered, 12)
+  assert.equal(recovered.stats.monitor_stale_mark_lines, 1)
+  const closed = guard([...everyHalfMinute(20), notEval(NOW - 10 * MIN, 'x')].sort(), open({ openPositions: [] }))
+  assert.deepEqual(closed.stop, [], 'posizione chiusa: nessun rischio da sorvegliare')
+  const reopened = open()
+  reopened.trades = [...reopened.trades, { symbol: 'BTC', side: 'LONG', quantity: 0.01, taker_fee: 0.36, ms: NOW - 2 * MIN }]
+  assert.deepEqual(guard([...everyHalfMinute(20), notEval(NOW - 10 * MIN, 'x')].sort(), reopened).stop, [], 'riapertura recente')
+  // nessun prezzo aggiornato da 6 min con posizione aperta (il monitor li aggiorna ogni ~35 s)
+  const noPrices = guard([pricesOk(NOW - 6 * MIN)])
+  assert.ok(noPrices.stop.some((x) => x.startsWith('nessun prezzo Hyperliquid aggiornato da 6 min')), noPrices.stop.join('; '))
+  // modello originale: il monitor cross margin non si applica
+  assert.deepEqual(guard([pricesOk(NOW - 6 * MIN), notEval(NOW - 6 * MIN, 'x')], open({ costModel: 'original' })).stop, [])
+})
+
+await step('hl-guard: funding non regolato per 3 ore consecutive con posizione aperta -> arresto; casi recuperabili', () => {
+  const at = (h, m = 0) => Date.UTC(2026, 9, 28, h, m)
+  const fill = (side, h, m) => ({ symbol: 'BTC', side, quantity: 0.01, taker_fee: 0.36, ms: at(h, m) })
+  const f = (h, status) => ({ symbol: 'BTC', funding_time: at(h), status })
+  const now = at(12, 30)
+  // 09 manca l'oracle, 10 manca il tasso, 11 nessuna riga oltre l'ora di tolleranza; 12 in attesa
+  const three = guard([pricesOk(now - 20_000)], open({ trades: [fill('LONG', 8, 30)], funding: [f(9, 'missing_oracle'), f(10, 'missing_rate')] }), now)
+  assert.ok(three.stop.some((x) => x.startsWith('funding non regolato per 3 ore consecutive')), three.stop.join('; '))
+  const two = guard([pricesOk(now - 20_000)], open({ trades: [fill('LONG', 8, 30)], funding: [f(9, 'settled'), f(10, 'missing_oracle'), f(11, 'missing_rate')] }), now)
+  assert.deepEqual(two.stop, [])
+  assert.ok(two.warnings.some((w) => w.startsWith('funding non regolato per 2')))
+  // un'ora senza posizione interrompe la serie
+  const gap = guard([pricesOk(now - 20_000)], open({ trades: [fill('LONG', 8, 30), fill('SELL', 9, 30), fill('LONG', 10, 30)], funding: [f(9, 'missing_oracle'), f(11, 'missing_rate')] }), now)
+  assert.deepEqual(gap.stop, [])
+  assert.equal(gap.stats.funding_unsettled_streak_hours, 1)
+})
+
+await step('hl-guard: riconciliazione errata -> avviso al primo controllo, arresto al secondo; errore di lettura solo avviso', async () => {
+  const good = await reconciliation(dbFile, dbFile.replace(/\.db$/, '.jsonl'), 2)
+  assert.equal(good.ok, true)
+  const copy = path.join(tmp, 'tampered-guard.db')
+  fs.copyFileSync(dbFile, copy)
+  const Database = createRequire(path.join(backendDir, 'package.json'))('better-sqlite3')
+  const db = new Database(copy)
+  db.prepare('UPDATE accounts SET current_cash = current_cash + 50 WHERE id = 2').run()
+  db.close()
+  const bad = await reconciliation(copy, dbFile.replace(/\.db$/, '.jsonl'), 2)
+  assert.equal(bad.ok, false)
+  const track = reconciliationTracker()
+  assert.equal(track(good).stop, null)
+  const first = track(bad)
+  assert.equal(first.stop, null)
+  assert.match(first.warning, /riconciliazione contabile errata \(1/)
+  assert.match(track(bad).stop, /riconciliazione contabile errata \(2 controlli consecutivi\): cassa non riconciliata/)
+  const t2 = reconciliationTracker()
+  assert.equal(t2(bad).stop, null)
+  assert.equal(t2(good).stop, null, 'un esito corretto azzera il conteggio')
+  assert.equal(t2(bad).stop, null)
+  assert.equal(t2({ error: 'SQLITE_BUSY' }).stop, null)
+  // lettura impossibile: avviso, poi bloccante al quinto controllo di fila
+  const t3 = reconciliationTracker()
+  for (let i = 0; i < 4; i++) assert.equal(t3({ error: 'SQLITE_BUSY' }).stop, null)
+  assert.match(t3({ error: 'SQLITE_BUSY' }).stop, /riconciliazione non verificabile \(5 controlli di fila\)/)
+})
+
+await step('hl-guard (Windows): fine riga CRLF e CLI su una cartella con spazi', () => {
+  const lines = [...everyHalfMinute(20), notEval(NOW - 6 * MIN, 'x')].sort()
+  const crlf = evaluateGuard({ lines: parseLog(lines.join('\r\n')), data: open(), now: NOW, accountCreatedMs: NaN })
+  assert.ok(crlf.stop.some((x) => x.startsWith('monitor cross margin')))
+  const dir = path.join(tmp, 'run con spazi')
+  fs.mkdirSync(dir)
+  fs.copyFileSync(dbFile, path.join(dir, 'pilot.db'))
+  fs.copyFileSync(dbFile.replace(/\.db$/, '.jsonl'), path.join(dir, 'trace.jsonl'))
+  fs.writeFileSync(path.join(dir, 'run-meta.json'), JSON.stringify({ status: 'running', account_id: 2, account_created_at: new Date(Date.now() - 2 * 60 * MIN).toISOString() }))
+  const t = Date.now()
+  const log = Array.from({ length: 31 }, (_, i) => [...hl429(t - (31 - i) * MIN), pricesOk(t - (31 - i) * MIN + 20_000)]).flat()
+  fs.writeFileSync(path.join(dir, 'backend.log'), log.join('\r\n'))
+  const r = node([path.join(pilotDir, 'hl-guard.mjs'), dir])
+  assert.equal(r.status, 2, r.stderr)
+  const out = JSON.parse(r.stdout)
+  assert.ok(out.stop.some((x) => x.includes("31 eventi nell'ultima ora")))
+  assert.equal(out.reconciliation.ok, true)
+  fs.writeFileSync(path.join(dir, 'backend.log'), log.slice(-6).join('\r\n'))
+  assert.equal(node([path.join(pilotDir, 'hl-guard.mjs'), dir]).status, 0)
+})
+
+async function guardStop(scenario, port, reason) {
+  const dir = path.join(tmp, scenario)
+  const r = node([path.join(pilotDir, 'run-pilot.mjs'), '--run-dir', dir, ...fakeArgs(port), '--cost-model', 'hyperliquid'], { FAKE_SCENARIO: scenario, FAKE_CYCLE_MS: '3000' })
+  assert.equal(r.status, 2, r.stdout + r.stderr)
+  const meta = JSON.parse(fs.readFileSync(path.join(dir, 'run-meta.json'), 'utf8'))
+  assert.equal(meta.status, 'stopped')
+  assert.ok(meta.reasons.some((x) => reason.test(x)), meta.reasons.join('; '))
+  assert.ok(meta.exit, 'app arrestata')
+  const check = JSON.parse(fs.readFileSync(path.join(dir, 'check.json'), 'utf8'))
+  assert.ok(check.guard?.stop.some((x) => reason.test(x)), 'esito del guard in check.json')
+  for (const f of ['pilot.db', 'backend.log', 'trace.jsonl']) assert.ok(fs.existsSync(path.join(dir, f)), `${f} conservato`)
+  assert.ok(await portFree(port), 'porta ancora occupata')
+  assert.ok(check.outcomes < 12, 'arrestato prima della fine dei cicli')
+}
+
+await step('launcher: 429 Hyperliquid persistenti -> arresto controllato, database, log, traccia e controlli conservati', () =>
+  guardStop('hl_429', 5797, /HTTP 429 Hyperliquid: 31 eventi/))
+
+await step('launcher: posizione aperta e monitor non valutato da oltre 5 min -> arresto controllato', () =>
+  guardStop('hl_blind', 5798, /monitor cross margin senza valutazioni da 6 min/))
+
+// --- 006J-4B: chiave AI solo in memoria (key-inject.mjs) -----------------------------------------------
+const inject = pathToFileURL(path.join(pilotDir, 'key-inject.mjs')).href
+
+await step('key-inject: chiave solo verso l host AI e solo al posto del segnaposto; variabile rimossa; percorso con spazi', () => {
+  const spaced = path.join(tmp, 'cartella con spazi')
+  fs.mkdirSync(spaced)
+  fs.copyFileSync(path.join(pilotDir, 'key-inject.mjs'), path.join(spaced, 'key-inject.mjs'))
+  const fakeKey = 'fake-' + 'q'.repeat(30)
+  const code = `
+    import http from 'node:http'
+    const seen = []
+    const srv = http.createServer((q, r) => { seen.push(q.headers.authorization ?? ''); r.end('{}') }).listen(0, '127.0.0.1')
+    await new Promise((r) => srv.once('listening', r))
+    const base = 'http://127.0.0.1:' + srv.address().port
+    const bearer = (k) => ({ Authorization: 'Bea' + 'rer ' + k, 'Content-Type': 'application/json' })
+    await fetch(base + '/v1beta/openai/chat/completions', { method: 'POST', headers: bearer(process.env.PH) })
+    await fetch(base + '/x', { headers: bearer('other-value') })
+    await fetch(new Request(base + '/req', { headers: bearer(process.env.PH) }))
+    await fetch('http://localhost:' + srv.address().port + '/other-host', { headers: bearer(process.env.PH) })
+    srv.close()
+    console.log(JSON.stringify({ seen, envLeft: process.env.FAKE_AI_KEY ?? null }))`
+  const run = (insecure) => spawnSync(process.execPath, ['--input-type=module', '-e', code], {
+    encoding: 'utf8',
+    env: {
+      ...process.env, NODE_OPTIONS: `--import ${pathToFileURL(path.join(spaced, 'key-inject.mjs')).href}`, PH: PLACEHOLDER,
+      FAKE_AI_KEY: fakeKey, ALPHA_PILOT_KEY_ENV: 'FAKE_AI_KEY', ALPHA_PILOT_KEY_HOST: '127.0.0.1', ALPHA_PILOT_KEY_INSECURE_TEST: insecure,
+    },
+  })
+  const ok = run('1')
+  assert.equal(ok.status, 0, ok.stderr)
+  const out = JSON.parse(ok.stdout.trim().split('\n').at(-1))
+  const b = (k) => 'Bea' + 'rer ' + k
+  assert.deepEqual(out.seen, [b(fakeKey), b('other-value'), b(fakeKey), b(PLACEHOLDER)])
+  assert.equal(out.envLeft, null, 'variabile rimossa dal processo dell app')
+  assert.match(ok.stderr, /\[key-inject\] attivo/)
+  assert.ok(!ok.stderr.includes(fakeKey), 'chiave stampata')
+  // senza HTTPS la chiave non viene inviata
+  const plain = JSON.parse(run('0').stdout.trim().split('\n').at(-1))
+  assert.deepEqual(plain.seen, [b(PLACEHOLDER), b('other-value'), b(PLACEHOLDER), b(PLACEHOLDER)])
+})
+
+await step('key-inject + client AI originale: il server riceve la chiave, il conto contiene solo il segnaposto', () => {
+  const authLog = path.join(tmp, 'auth.log')
+  const fakeKey = 'fake-' + 'w'.repeat(30)
+  const r = spawnSync(process.execPath, [...tsx, 'pilot/test/budget-client.mts', '1'], {
+    cwd: backendDir, encoding: 'utf8',
+    env: {
+      ...process.env, NODE_OPTIONS: `--import ${inject}`, LOG_LEVEL: 'error', TEST_ACCOUNT_KEY: PLACEHOLDER, TEST_AUTH_LOG: authLog,
+      FAKE_AI_KEY: fakeKey, ALPHA_PILOT_KEY_ENV: 'FAKE_AI_KEY', ALPHA_PILOT_KEY_HOST: '127.0.0.1', ALPHA_PILOT_KEY_INSECURE_TEST: '1',
+    },
+  })
+  assert.equal(r.status, 0, r.stderr.slice(-400))
+  const seen = fs.readFileSync(authLog, 'utf8').trim().split('\n')
+  assert.ok(seen.length >= 1)
+  assert.ok(seen.every((h) => h === 'Bea' + 'rer ' + fakeKey), 'ogni tentativo (retry compresi) con la chiave reale')
+  assert.ok(!r.stdout.includes(fakeKey) && !r.stderr.includes(fakeKey), 'chiave nell output')
+})
+
+if (!isWindows) {
+  // interruzione brusca (come un crash o un'interruzione di corrente): launcher e app terminati senza handler
+  await step('launcher --key-mode env: crash di launcher e app -> nessuna chiave nei file della prova', async () => {
+    const dir = path.join(tmp, 'crash')
+    const fakeKey = 'fake-' + 'z'.repeat(24)
+    const { p, exit } = await startFake(dir, 5799, { FAKE_TEST_KEY: fakeKey }, ['--key-mode', 'env', '--key-env', 'FAKE_TEST_KEY'])
+    const appPid = Number(fs.readFileSync(path.join(dir, 'fake-pid'), 'utf8'))
+    p.kill('SIGKILL')
+    process.kill(appPid, 'SIGKILL')
+    await exit
+    for (let i = 0; i < 20 && !(await portFree(5799)); i++) await new Promise((r) => setTimeout(r, 100))
+    assert.ok(await portFree(5799), 'app ancora attiva')
+    assert.equal(fs.existsSync(path.join(dir, 'report.json')), false, 'nessun report: interruzione senza arresto controllato')
+    const Database = createRequire(path.join(backendDir, 'package.json'))('better-sqlite3')
+    const db = new Database(path.join(dir, 'pilot.db'), { readonly: true })
+    const keys = db.prepare('SELECT api_key FROM accounts').all().map((x) => x.api_key)
+    db.close()
+    assert.deepEqual(keys, [PLACEHOLDER])
+    for (const f of fs.readdirSync(dir)) assert.ok(!fs.readFileSync(path.join(dir, f)).includes(fakeKey), `chiave in ${f}`)
+  })
+}
 
 await step('launcher: cartella non vuota rifiutata', () => {
   const dir = path.join(tmp, 'complete') // gia usata

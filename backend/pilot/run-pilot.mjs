@@ -16,11 +16,16 @@
 //   --key-env GEMINI_API_KEY           variabile d'ambiente con la chiave, solo con --key-mode env
 //   --proxy-shim auto | on | off       (auto: carica ccxt-proxy.mjs se HTTPS_PROXY e impostata)
 //   --price-in / --price-out           USD per 1M token, solo per il costo nel report
-//   --cost-model original | hyperliquid  regole economiche del conto (default original). hyperliquid
-//                                      per ora cambia solo la commissione taker (0,045%, livello base)
+//   --cost-model original | hyperliquid  regole economiche del conto (default original); hyperliquid:
+//                                      commissione 0,045%, funding orario, mark price, cross margin, book
+//   --guard on | off                   sorveglianza Hyperliquid (hl-guard.mjs, default on)
+//   --recon-ms 120000                  intervallo dei controlli di riconciliazione del guard
+//
+// Chiave AI (--key-mode env): il conto contiene solo il segnaposto; la chiave viene aggiunta alle sole
+// richieste verso l'host AI dal preload key-inject.mjs nel processo dell'app (mai nel database o nei log).
 //
 // Arresto pulito su qualunque sistema: creare il file STOP nella cartella della prova
-// (es. `type nul > <run-dir>\STOP` su Windows, `touch <run-dir>/STOP` altrove) oppure Ctrl+C nel
+// (PowerShell: `New-Item -ItemType File <run-dir>\STOP`; altrove `touch <run-dir>/STOP`) oppure Ctrl+C nel
 // terminale del launcher. Entrambi fermano l'app, salvano stato e report e cancellano la chiave.
 //
 // Non modifica codice, prompt, strategie, sizing, monitor o liquidazioni: avvia l'app originale
@@ -31,6 +36,7 @@ import net from 'node:net'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { evaluateRun } from './check-run.mjs'
+import { evaluateGuard, loadGuardData, parseLog, reconciliation, reconciliationTracker } from './hl-guard.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const backendDir = path.resolve(here, '..')
@@ -59,6 +65,8 @@ const cfg = {
   pollMs: Number(flag('--poll-ms', 15_000)),
   firstCallMs: Number(flag('--first-call-ms', 360_000)),
   startupMs: Number(flag('--startup-ms', 180_000)),
+  guard: flag('--guard', 'on'),
+  reconMs: Number(flag('--recon-ms', 120_000)),
 }
 const PLACEHOLDER_KEY = 'network-secret-placeholder'
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -73,6 +81,7 @@ function fail(code, message) {
 if (!cfg.runDir) fail(64, 'manca --run-dir (cartella nuova per database, log e traccia)')
 if (!['network-secret', 'env'].includes(cfg.keyMode)) fail(64, `--key-mode non valido: ${cfg.keyMode}`)
 if (!['original', 'hyperliquid'].includes(cfg.costModel)) fail(64, `--cost-model non valido: ${cfg.costModel}`)
+if (!['on', 'off'].includes(cfg.guard)) fail(64, `--guard non valido: ${cfg.guard}`)
 const runDir = path.resolve(cfg.runDir)
 const files = {
   db: path.join(runDir, 'pilot.db'),
@@ -90,6 +99,7 @@ const plan = {
   run_dir: runDir, cycles: cfg.cycles, max_attempts: cfg.maxAttempts, timeout_min: cfg.timeoutMin,
   model: cfg.model, base_url: cfg.baseUrl, key_mode: cfg.keyMode, proxy_shim: useShim, port: cfg.port,
   capital_usdc: 1000, cost_model: cfg.costModel, markets: 'BTC ETH SOL BNB XRP DOGE (prompt originale)', interval_s: 300,
+  guard: cfg.guard,
 }
 if (!cfg.authorized) {
   console.log(JSON.stringify({ status: 'not_started', reason: 'manca --authorized: nessuna chiamata AI eseguita', plan }, null, 2))
@@ -100,11 +110,11 @@ if (!cfg.authorized) {
 if (fs.existsSync(runDir) && fs.readdirSync(runDir).length > 0) {
   fail(65, `la cartella ${runDir} non e vuota: serve un database nuovo e dedicato`)
 }
-let apiKey = PLACEHOLDER_KEY
-if (cfg.keyMode === 'env') {
-  apiKey = process.env[cfg.keyEnv] ?? ''
-  if (!apiKey.trim()) fail(65, `variabile ${cfg.keyEnv} vuota o assente`)
-}
+// Il conto riceve sempre il segnaposto. Con --key-mode env la chiave reale resta nella variabile d'ambiente:
+// il preload key-inject.mjs la aggiunge solo alle richieste verso l'host AI (mai nel database o nei log).
+const apiKey = PLACEHOLDER_KEY
+const realKey = cfg.keyMode === 'env' ? process.env[cfg.keyEnv] ?? '' : null
+if (cfg.keyMode === 'env' && !realKey.trim()) fail(65, `variabile ${cfg.keyEnv} vuota o assente`)
 const portBusy = await new Promise((resolve) => {
   const s = net.connect({ port: cfg.port, host: '127.0.0.1' })
   s.once('connect', () => (s.destroy(), resolve(true)))
@@ -125,6 +135,12 @@ if (useShim) {
   env.NODE_USE_ENV_PROXY = '1'
   env.NODE_OPTIONS = `${env.NODE_OPTIONS ?? ''} --import ${pathToFileURL(path.join(here, 'ccxt-proxy.mjs')).href}`.trim()
 }
+if (cfg.keyMode === 'env') {
+  env.ALPHA_PILOT_KEY_ENV = cfg.keyEnv
+  env.ALPHA_PILOT_KEY_HOST = new URL(cfg.baseUrl).hostname
+  env.ALPHA_PILOT_KEY_PLACEHOLDER = PLACEHOLDER_KEY
+  env.NODE_OPTIONS = `${env.NODE_OPTIONS ?? ''} --import ${pathToFileURL(path.join(here, 'key-inject.mjs')).href}`.trim()
+}
 // L'app gira in UN solo processo Node (loader tsx caricato con --import): la CLI di tsx avvierebbe
 // un secondo processo che su Windows resterebbe orfano quando il primo viene terminato.
 const command = cfg.testBackend
@@ -139,6 +155,8 @@ child.on('exit', (code, signal) => (exited = { code, signal, at: now() }))
 
 const meta = { plan, started_at: now(), account_created_at: null, account_id: null, stopped_at: null, status: 'starting', reasons: [] }
 const saveMeta = () => fs.writeFileSync(files.meta, JSON.stringify(meta, null, 2))
+/** Ultima valutazione di hl-guard.mjs (salvata anche in run-meta.json e check.json). */
+let guardResult = null
 saveMeta()
 const read = (f) => (fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : '')
 const evaluate = () =>
@@ -183,9 +201,11 @@ async function doFinish(status, reasons) {
   await stopApp(status, reasons)
   await new Promise((r) => logStream.end(r))
   const check = evaluate()
+  if (guardResult) check.guard = guardResult
   fs.writeFileSync(files.check, JSON.stringify(check, null, 2))
   if (cfg.keyMode === 'env' && fs.existsSync(files.db)) {
-    // la chiave reale non deve restare nel database della prova
+    // Difesa in profondita: la chiave non viene mai scritta nel database (segnaposto + key-inject.mjs);
+    // se una riga la contenesse comunque viene sostituita, poi si verifica che non resti in nessun conto.
     const { createRequire } = await import('node:module')
     const Database = createRequire(path.join(backendDir, 'package.json'))('better-sqlite3')
     // su Windows il file puo restare bloccato per qualche istante dopo la chiusura dell'app: si riprova
@@ -194,7 +214,9 @@ async function doFinish(status, reasons) {
       try {
         const db = new Database(files.db, { timeout: 5000 })
         try {
-          db.prepare("UPDATE accounts SET api_key='redacted-after-run' WHERE api_key=?").run(apiKey)
+          db.prepare("UPDATE accounts SET api_key='redacted-after-run' WHERE api_key=?").run(realKey)
+          const left = db.prepare('SELECT COUNT(*) AS n FROM accounts WHERE api_key=?').get(realKey).n
+          if (left !== 0) throw new Error(`chiave ancora presente in ${left} conti`)
         } finally {
           db.close()
         }
@@ -239,6 +261,7 @@ while (Date.now() < startDeadline && !exited && !/All services initialized succe
 const startup = evaluate()
 const startupProblems = [
   ...(exited ? [`app terminata all'avvio: ${JSON.stringify(exited)}`] : []),
+  ...(cfg.keyMode === 'env' && !/\[key-inject\] attivo/.test(read(files.log)) ? ['preload key-inject non attivo: la chiave non verrebbe inviata'] : []),
   ...(/All services initialized successfully/.test(read(files.log)) ? [] : ['avvio non completato']),
   ...startup.blocking,
   ...startup.stop,
@@ -267,8 +290,49 @@ try {
   await finish('aborted_account', [`creazione del conto fallita: ${e}`])
 }
 meta.account_id = created.id
+meta.status = 'running'
 saveMeta()
 const t0 = Date.now()
+const accountCreatedMs = Date.parse(meta.account_created_at)
+const reconTrack = reconciliationTracker()
+let lastRecon = 0
+// sorveglianza che non riesce a leggere i dati: un errore e un avviso, una serie lunga e bloccante
+// (senza sorveglianza la prova da 24 h non e protetta)
+const GUARD_READ_ERRORS_MAX = 20 // controlli consecutivi, ~5 min con --poll-ms 15000
+let guardReadErrors = 0
+
+// Sorveglianza Hyperliquid (hl-guard.mjs): log + database in sola lettura. Un errore di lettura e un avviso.
+async function runGuard() {
+  if (cfg.guard !== 'on' || !fs.existsSync(files.db)) return []
+  const reasons = []
+  try {
+    const data = loadGuardData(files.db, meta.account_id)
+    guardResult = evaluateGuard({ lines: parseLog(read(files.log)), data, now: Date.now(), accountCreatedMs })
+    guardReadErrors = 0
+    reasons.push(...guardResult.stop)
+    if (data.hasLedger && Date.now() - lastRecon >= cfg.reconMs) {
+      lastRecon = Date.now()
+      let result
+      try {
+        result = await reconciliation(files.db, files.trace, meta.account_id)
+      } catch (e) {
+        result = { error: String(e) }
+      }
+      const r = reconTrack(result)
+      guardResult.reconciliation = { ...result, at: now(), warning: r.warning }
+      if (r.stop) reasons.push(r.stop)
+    }
+  } catch (e) {
+    guardReadErrors++
+    guardResult = { ...(guardResult ?? {}), read_error: String(e), read_errors_in_a_row: guardReadErrors, at: now() }
+    if (guardReadErrors >= GUARD_READ_ERRORS_MAX) reasons.push(`sorveglianza Hyperliquid non funzionante: ${guardReadErrors} letture fallite di fila (${e})`)
+  }
+  meta.guard = guardResult
+  try {
+    saveMeta()
+  } catch {} // file aperto da un altro programma (es. su Windows): riprova al controllo successivo
+  return reasons
+}
 
 // --- 3. sorveglianza fino a fine pilota, errore o timeout ------------------------------------------
 for (;;) {
@@ -280,6 +344,8 @@ for (;;) {
   if (r.stop.length) await finish('stopped', r.stop)
   if (r.blocking.length) await finish('stopped', r.blocking)
   if ((r.trace?.requests ?? 0) === 0 && elapsed > cfg.firstCallMs) await finish('stopped', ['nessuna chiamata AI dopo la creazione del conto'])
+  const guardStop = await runGuard()
+  if (guardStop.length) await finish('stopped', guardStop)
   if (r.cycles_complete) await finish('complete', [`${r.outcomes} cicli completati`])
   if (elapsed > cfg.timeoutMin * 60_000) await finish('stopped', [`timeout di ${cfg.timeoutMin} minuti`])
 }
