@@ -36,6 +36,10 @@ interface Job {
 const hyperliquidChecks = new Set<number>()
 /** Last reason an account could not be evaluated, to log each change once. */
 const hyperliquidSkips = new Map<number, string>()
+/** Checks skipped in a row per account, reported when it is evaluated again. */
+const hyperliquidSkipStreak = new Map<number, number>()
+/** Margin checks evaluated and skipped since start (pilot report, tests). */
+export const hyperliquidMonitorStats = { evaluated: 0, skipped: 0 }
 
 /** Unified task scheduler. */
 export class TaskScheduler {
@@ -381,8 +385,12 @@ export class TaskScheduler {
       const rows = openRows()
       if (!account || rows.length === 0) return
       const skip = (reason: string) => {
-        if (hyperliquidSkips.get(accountId) !== reason) {
-          hyperliquidSkips.set(accountId, reason)
+        hyperliquidMonitorStats.skipped++
+        hyperliquidSkipStreak.set(accountId, (hyperliquidSkipStreak.get(accountId) ?? 0) + 1)
+        // logged once per kind of reason: a mark age changing every 5 s is the same reason
+        const kind = reason.replace(/\d+/g, '#')
+        if (hyperliquidSkips.get(accountId) !== kind) {
+          hyperliquidSkips.set(accountId, kind)
           logger.warning(`Hyperliquid margin of account ${account.name} not evaluated, no liquidation: ${reason}`)
         }
       }
@@ -392,6 +400,10 @@ export class TaskScheduler {
         accruedInterest: {}, // the hyperliquid model charges no interest
       })
       if (result.status !== 'ready') return skip([...result.anomalies, ...result.reasons].join('; '))
+      hyperliquidMonitorStats.evaluated++
+      const skipped = hyperliquidSkipStreak.get(accountId) ?? 0
+      if (skipped > 0) logger.info(`Hyperliquid margin of account ${account.name} evaluated again after ${skipped} skipped checks`)
+      hyperliquidSkipStreak.delete(accountId)
       hyperliquidSkips.delete(accountId)
       const state = result.state
       if (!state.liquidatable) return

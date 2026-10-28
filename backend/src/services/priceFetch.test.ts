@@ -6,8 +6,9 @@
  * Run: npx tsx --test src/services/priceFetch.test.ts
  *
  * ccxt.hyperliquid is replaced by a fake exchange before the services load,
- * so no network is used. Each fake fetchTicker / fetchTickers call stands for
- * 12 HTTP requests, the number measured on Hyperliquid for either call.
+ * so no network is used. A fake fetchTicker call stands for 12 HTTP requests
+ * (ccxt reloads every market kind); the mainstream fetchTickers call asks for
+ * perpetuals only since Task 006J-2 and stands for 1 (measured with ccxt).
  */
 import { test, after, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
@@ -24,10 +25,11 @@ globalThis.fetch = (() => {
 }) as typeof fetch
 console.error = () => {}
 
-const HTTP_PER_CALL = 12
 const provider = {
   prices: {} as Record<string, unknown>,
   fail: false,
+  /** The error thrown when `fail` is set: HTTP 429 unless changed. */
+  error: () => new ccxt.RateLimitExceeded('429 (simulated)') as Error,
   tickerCalls: 0,
   tickersCalls: 0,
 }
@@ -40,20 +42,20 @@ const delay = () => new Promise((r) => setTimeout(r, 20))
   async fetchTicker(symbol: string) {
     provider.tickerCalls++
     await delay()
-    if (provider.fail) throw new ccxt.RateLimitExceeded('429 (simulated)')
+    if (provider.fail) throw provider.error()
     return quote(symbol)
   }
   async fetchTickers(symbols: string[]) {
     provider.tickersCalls++
     await delay()
-    if (provider.fail) throw new ccxt.RateLimitExceeded('429 (simulated)')
+    if (provider.fail) throw provider.error()
     return Object.fromEntries(symbols.map((s) => [s, quote(s)]))
   }
 }
 const calls = () => provider.tickerCalls + provider.tickersCalls
-const http = () => calls() * HTTP_PER_CALL
+const http = () => provider.tickerCalls * 12 + provider.tickersCalls
 
-const { getLastPrice } = await import('./marketData.js')
+const { getLastPrice, resetPriceRefreshState, RATE_LIMIT_BACKOFF_MS } = await import('./marketData.js')
 const { priceCache } = await import('./priceCache.js')
 const { db, ensureSchema, rawDb } = await import('../db/client.js')
 const { accounts, users } = await import('../db/schema.js')
@@ -73,15 +75,17 @@ beforeEach(() => {
   ;(priceCache as any).cache.clear()
   provider.prices = { ...MARKET, HYPE: 40 }
   provider.fail = false
+  provider.error = () => new ccxt.RateLimitExceeded('429 (simulated)')
   provider.tickerCalls = 0
   provider.tickersCalls = 0
+  resetPriceRefreshState()
 })
 
-test('AI cycle: the six prices cost one call (12 HTTP) instead of six (72 HTTP)', async (t) => {
+test('AI cycle: the six prices cost one call (1 HTTP) instead of six (72 HTTP)', async (t) => {
   for (const s of SIX) assert.equal(await getLastPrice(s, 'CRYPTO'), MARKET[s as keyof typeof MARKET])
   t.diagnostic(`calls=${calls()} http=${http()}`)
   assert.equal(calls(), 1)
-  assert.equal(http(), 12)
+  assert.equal(http(), 1)
 })
 
 test('within the 30 s cache no new call is made', async () => {
@@ -110,12 +114,28 @@ test('concurrent requests for different symbols get their own prices from one ca
   assert.equal(calls(), 1)
 })
 
-test('an error rejects every waiting caller, caches nothing, and the next request retries', async () => {
+test('a 429 rejects every waiting caller, caches nothing, and the next request waits for the pause', async (t) => {
   provider.fail = true
   const results = await Promise.allSettled([1, 2, 3].map(() => getLastPrice('BTC', 'CRYPTO')))
   assert.deepEqual(results.map((r) => r.status), ['rejected', 'rejected', 'rejected'])
   assert.equal(calls(), 1)
   assert.equal((priceCache as any).cache.size, 0)
+
+  provider.fail = false
+  await assert.rejects(getLastPrice('BTC', 'CRYPTO'), /paused/)
+  assert.equal(calls(), 1, 'no request during the pause')
+  const now = Date.now()
+  t.mock.method(Date, 'now', () => now + RATE_LIMIT_BACKOFF_MS[0]! + 1)
+  assert.equal(await getLastPrice('BTC', 'CRYPTO'), 84000)
+  assert.equal(calls(), 2)
+})
+
+test('any other error rejects every waiting caller and the next request retries at once', async () => {
+  provider.fail = true
+  provider.error = () => new Error('network error (simulated)')
+  const results = await Promise.allSettled([1, 2, 3].map(() => getLastPrice('BTC', 'CRYPTO')))
+  assert.deepEqual(results.map((r) => r.status), ['rejected', 'rejected', 'rejected'])
+  assert.equal(calls(), 1)
 
   provider.fail = false
   assert.equal(await getLastPrice('BTC', 'CRYPTO'), 84000)

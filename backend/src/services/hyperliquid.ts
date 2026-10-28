@@ -118,18 +118,26 @@ class HyperliquidClient {
   }
 
   /**
-   * Last prices of several symbols from one fetchTickers call, which makes
-   * the same markets request as a single fetchTicker. A symbol without a
-   * price maps to null; on error every symbol maps to null.
+   * Last prices of several symbols from one fetchTickers call. A symbol
+   * without a price maps to null; on error every symbol maps to null, or the
+   * error is thrown with `rethrow` (the caller tells a rate limit apart).
+   *
+   * When every symbol is a perpetual the call asks for perpetuals only
+   * ({ type: 'swap' }: one `metaAndAssetCtxs` request, weight 20). Without a
+   * type ccxt reloads every market kind: spot, perpetuals, the perp dex list
+   * and the HIP-3 dexes, 12 requests (weight 240) for the same six tickers,
+   * which is what exhausted the 1200/minute limit in the 006J-1 pilot.
    */
   async getLastPrices(
     symbols: string[],
+    options: { rethrow?: boolean } = {},
   ): Promise<Record<string, number | null>> {
     const result: Record<string, number | null> = {}
     for (const symbol of symbols) result[symbol] = null
     try {
       const formatted = symbols.map((s) => this.formatSymbol(s))
-      const tickers = await this.getExchange().fetchTickers(formatted)
+      const perpsOnly = formatted.every((s) => s.endsWith(':USDC'))
+      const tickers = await this.getExchange().fetchTickers(formatted, perpsOnly ? { type: 'swap' } : {})
       const receivedAt = Date.now()
       symbols.forEach((symbol, i) => {
         const ticker = tickers[formatted[i]!]
@@ -147,6 +155,7 @@ class HyperliquidClient {
       logger.info(`Got prices for ${formatted.join(', ')}`)
     } catch (e) {
       logger.error(`Error fetching prices for ${symbols.join(', ')}: ${e}`)
+      if (options.rethrow) throw e
     }
     return result
   }
@@ -312,8 +321,8 @@ export const hyperliquidClient = new HyperliquidClient()
 export const getLastPriceFromHyperliquid = (symbol: string) =>
   hyperliquidClient.getLastPrice(symbol)
 
-export const getLastPricesFromHyperliquid = (symbols: string[]) =>
-  hyperliquidClient.getLastPrices(symbols)
+export const getLastPricesFromHyperliquid = (symbols: string[], options: { rethrow?: boolean } = {}) =>
+  hyperliquidClient.getLastPrices(symbols, options)
 
 export const getCandleSnapshotFromHyperliquid = (
   coin: string,

@@ -36,9 +36,9 @@ import {
 import {
   getAssetContext,
   getFundingHistoryFromHyperliquid,
-  getLastPricesFromHyperliquid,
   MAINSTREAM_CRYPTOS,
 } from './hyperliquid.js'
+import { refreshMainstreamPrices } from './marketData.js'
 import { dbDateMs } from '../utils/datetime.js'
 import { getLogger } from '../utils/logger.js'
 
@@ -80,9 +80,15 @@ function contextOracles(): OraclePrices {
 export const defaultFundingDeps: FundingDeps = {
   fetchFundingHistory: getFundingHistoryFromHyperliquid,
   fetchOraclePrices: async () => {
-    // the same single request as the price path; it refreshes the contexts
-    const prices = await getLastPricesFromHyperliquid(MAINSTREAM_CRYPTOS)
-    return Object.values(prices).some((p) => p !== null) ? contextOracles() : null
+    // the price path's own request: shared with the monitor and the cycle,
+    // paused after a 429 like every other refresh; it refreshes the contexts
+    try {
+      await refreshMainstreamPrices()
+      return contextOracles()
+    } catch (e) {
+      logger.warning(`Oracle prices not refreshed: ${e}`)
+      return null
+    }
   },
   cachedOraclePrices: contextOracles,
 }
