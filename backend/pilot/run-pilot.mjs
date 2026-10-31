@@ -21,8 +21,9 @@
 //   --guard on | off                   sorveglianza Hyperliquid (hl-guard.mjs, default on)
 //   --recon-ms 120000                  intervallo dei controlli di riconciliazione del guard
 //   --position-info v1 | v2            informazioni sulla posizione inviate all'AI (007A; v1 = originale)
-//   --protection off | on              protezione del profitto e del rischio, solo modello hyperliquid (007A)
-//   --protection-config '{"giveBackFraction":0.4}'  parametri diversi dai default (JSON, convalidato dall'app)
+//   --protection off | C1 | C2 | C3    gestione delle uscite, solo modello hyperliquid (007C): C1 stop 2 ATR + chandelier
+//                                      3 ATR; C2 stop 2 ATR, 25% a +1,5R, pareggio + chandelier; C3 stop 2 ATR, TP +2R
+//   --protection-config '{"cooldownMs":7200000}'  parametri diversi dai default (JSON, convalidato dall'app)
 //
 // Chiave AI (--key-mode env): il conto contiene solo il segnaposto; la chiave viene aggiunta alle sole
 // richieste verso l'host AI dal preload key-inject.mjs nel processo dell'app (mai nel database o nei log).
@@ -72,7 +73,7 @@ const cfg = {
   reconMs: Number(flag('--recon-ms', 120_000)),
   // variante sperimentale (007A): valore effettivo = opzione, altrimenti ambiente, altrimenti originale
   positionInfo: flag('--position-info', process.env.ALPHA_POSITION_INFO ?? 'v1').toLowerCase(),
-  protection: flag('--protection', process.env.ALPHA_PROTECTION ?? 'off').toLowerCase(),
+  protection: ((v) => (v.toLowerCase() === 'off' ? 'off' : v.toUpperCase()))(flag('--protection', process.env.ALPHA_PROTECTION ?? 'off')),
   protectionConfig: flag('--protection-config', process.env.ALPHA_PROTECTION_CONFIG ?? ''),
 }
 const PLACEHOLDER_KEY = 'network-secret-placeholder'
@@ -90,7 +91,7 @@ if (!['network-secret', 'env'].includes(cfg.keyMode)) fail(64, `--key-mode non v
 if (!['original', 'hyperliquid'].includes(cfg.costModel)) fail(64, `--cost-model non valido: ${cfg.costModel}`)
 if (!['on', 'off'].includes(cfg.guard)) fail(64, `--guard non valido: ${cfg.guard}`)
 if (!['v1', 'v2'].includes(cfg.positionInfo)) fail(64, `--position-info non valido: ${cfg.positionInfo}`)
-if (!['on', 'off'].includes(cfg.protection)) fail(64, `--protection non valido: ${cfg.protection}`)
+if (!['off', 'C1', 'C2', 'C3'].includes(cfg.protection)) fail(64, `--protection non valido: ${cfg.protection} (off, C1, C2 o C3)`)
 if (cfg.protectionConfig) {
   try {
     const parsed = JSON.parse(cfg.protectionConfig)

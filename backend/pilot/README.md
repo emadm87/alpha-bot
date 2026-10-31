@@ -149,52 +149,54 @@ Il launcher:
    senza alcuna chiamata AI;
 4. crea il conto una sola volta e sorveglia log e traccia ogni 15 s.
 
-## 3b. Variante sperimentale 007A (branch `claude/exp-007a-profit-protection`)
+## 3b. Variante sperimentale (branch `claude/exp-007a-profit-protection`, Task 007A / 007C)
 
 Due interruttori indipendenti, **spenti per default**: con i default il prompt inviato a Gemini e il
-comportamento sono identici alla versione originale (verificato: stesso hash SHA-256 del prompt).
+comportamento sono identici alla versione originale (verificato: stesso SHA-256 del prompt di `b2459e8`).
 
 | Opzione del launcher | Variabile dell'app | Effetto |
 |---|---|---|
-| `--position-info v2` | `ALPHA_POSITION_INFO=v2` | All'AI vengono mostrati, per ogni posizione perpetual, `entry_value` (quantità × prezzo di ingresso) **distinto** da `current_value` (quantità × prezzo attuale), `current_price`, `unrealized_pnl`, `fees_paid`, `estimated_exit_fee`, `financing_net` (funding o interessi), `estimated_net_pnl_if_closed_now`, `return_on_margin_pct`, `opened_at`, `holding_minutes`. In v1 `current_value` era quantità × prezzo di ingresso (valore all'ingresso, qualunque cosa facesse il prezzo). |
-| `--protection on` | `ALPHA_PROTECTION=on` | Modulo di protezione del profitto e gestione del rischio, **solo modello `hyperliquid`**, valutato dal monitor cross margin (5 s) a mark price valido e fresco. |
-| `--protection-config '{...}'` | `ALPHA_PROTECTION_CONFIG` | Parametri diversi dai default; convalidati (campo sconosciuto o fuori intervallo = l'app non parte). |
+| `--position-info v2` | `ALPHA_POSITION_INFO=v2` | All'AI: `entry_value` distinto da `current_value` (in v1 `current_value` era quantità × prezzo di ingresso), `current_price`, `unrealized_pnl`, `fees_paid`, `estimated_exit_fee`, `financing_net`, `estimated_net_pnl_if_closed_now`, `return_on_margin_pct`, `opened_at`, `holding_minutes`; con il modulo acceso anche `exit_plan` (stop, livello di uscita, target, rischio allo stop) e la riga dei cooldown attivi. |
+| `--protection C1` / `C2` / `C3` | `ALPHA_PROTECTION=C1…` | Gestione delle uscite, **solo modello `hyperliquid`**, nel monitor cross margin (5 s), a mark price valido e fresco. |
+| `--protection-config '{...}'` | `ALPHA_PROTECTION_CONFIG` | Parametri diversi dai default (JSON convalidato: un valore sconosciuto o fuori intervallo ferma l'app all'avvio). |
 
-Il launcher scrive la variante in `run-meta.json` (`plan.experiment`) e nel report (`experiment`), e **si ferma
-prima di creare il conto** se l'app non conferma nel log la riga `Experiment config: position_info=… protection=…`.
+Il launcher scrive la variante in `run-meta.json` (`plan.experiment`) e nel report, e **si ferma prima di
+creare il conto** se l'app non conferma nel log `Experiment config: position_info=… protection=…`.
 
-**Regole del modulo** (`src/services/profitProtection.ts`, pure e senza soglie su prezzi o monete). Gemini decide
-ogni operazione; il modulo chiude (tutto o in parte) una posizione già aperta solo in due casi:
+**Regole** (`src/services/exitRules.ts`; Gemini decide ingressi, dimensione e leva):
 
-- **uscita per rischio**: il risultato netto scende a `-R` e nessun profitto aveva alzato il pavimento;
-- **uscita per protezione del profitto**: il risultato netto scende al pavimento che il profitto stesso aveva alzato.
+- tutte: stop iniziale a **2 × ATR(14, 1 h)** dal prezzo di ingresso; R = quella distanza. L'ATR viene solo da
+  barre 1 h chiuse **prima del primo fill** (dalle candele 15 m già in cache) e resta fisso per la posizione;
+- **C1**: chandelier = miglior prezzo − 3 ATR (mai sotto lo stop), nessun take profit;
+- **C2**: 25% realizzato a +1,5 R; poi il resto con pareggio (prezzo di ingresso) e chandelier 3 ATR. Se il 25%
+  arrotondato al lotto vale meno di 10 USD (minimo Hyperliquid) non si piazza: evento `skipped` una sola volta e
+  pareggio + chandelier si applicano all'intera posizione;
+- **C3**: take profit dell'intera posizione a +2 R, altrimenti lo stop;
+- **cooldown**: dopo un'uscita del modulo che chiude la posizione, l'AI non può riaprire la stessa moneta nella
+  stessa direzione per 2 h (`cooldownMs`); la direzione opposta è libera. Il rifiuto è registrato;
+- **emergenza sul conto** (separata dagli stop): se le posizioni aperte insieme perdono il 3% del valore del conto
+  (`emergencyLossPctOfEquity`), si chiudono tutte;
+- **rischio sul capitale**: per ogni posizione si calcola la perdita allo stop (movimento + commissioni +
+  slippage stimato) in USDC e in % del conto, il confronto con i profili 0,5 / 1 / 2% e il segnale `oversized` sopra
+  il riferimento 1%. **Il sizing resta quello di Gemini**: una posizione sovradimensionata è segnalata, non ridotta;
+- esecuzione: ordini `PRT-…` del motore (stesse commissioni, book, lotti, minimi, riconciliazione); fill parziale
+  del book → resto al tentativo successivo; errori → nuovi tentativi dopo 15 s, 30 s, 60 s… fino a 15 min;
+  posizione cambiata nel frattempo → riletta e chiusa una volta con la quantità attuale.
 
-`R` = perdita ammessa per posizione = min(2% del valore del conto all'apertura, 50% del margine). Risultato netto =
-P&L non realizzato al mark + P&L realizzato dalle chiusure parziali − commissioni pagate − commissione di uscita
-stimata + funding regolato. Fasi: **0** pavimento −R; **1** dopo un picco di +1R pavimento = 0 (pareggio);
-**2** dopo +2R pavimento = picco × (1 − 0,5). La fase e il picco non scendono mai. Chiusure parziali
-(`trailExitFraction` < 1, default 1 = chiude tutto) solo dal pavimento della fase 2 e solo con netto > 0.
-I valori di default sono convenzioni a priori (rischio 1–2% per posizione, pareggio a +1R, trailing da +2R che
-restituisce metà): **non sono stati adattati a nessuna operazione registrata** e vanno confermati o respinti
-dall'esperimento. Lo spread e la profondità dell'uscita non sono nel netto stimato.
-
-Ogni cambiamento è in `protection_events` (fasi `breakeven_armed`/`trailing_armed`, uscite `exit_risk`/
-`exit_profit_protection` eseguite, parziali o fallite, con i numeri usati); lo stato di ogni posizione in
-`position_protection`; HOLD e CLOSE dell'AI restano in `ai_decision_logs`. Le uscite sono ordini `PRT-…` del
-motore (stesse commissioni, stesso book, stessa riconciliazione). `report.json` ha le sezioni `protection` e
-`decision_trace` (cronologia unica AI + protezione).
+Tutto è registrato: `exit_plans` (livelli, ATR, rischio, stato) ed `exit_events` (piani, parziali, uscite
+eseguite/parziali/fallite con fill e slippage rispetto al mark, emergenze, cooldown). `report.json` ha le sezioni
+`exit_management` e `decision_trace` (cronologia unica AI + modulo).
 
 **Replay cronologico** su una prova registrata (sola lettura, senza AI né rete):
 
 ```bash
-node --import tsx pilot/replay-protection.mjs pilot/runs/<cartella> --text
-node --import tsx pilot/replay-protection.mjs pilot/runs/<cartella> --config '{"giveBackFraction":0.4}'
+node --import tsx pilot/replay-exits.mjs pilot/runs/<cartella> --text
 ```
 
-Ogni decisione usa solo i prezzi, i fill e il funding esistenti a quel momento. Il risultato è **ipotetico**:
-i prezzi sono i mid dei prompt (uno ogni ciclo, non il mark né il monitor a 5 s), il book storico non è
-registrato, e dopo un'uscita ipotetica il resto della prova non è applicabile (Gemini avrebbe deciso altro).
-I limiti sono nel campo `limits` dell'output.
+Usa le candele 15 m di `research/exit-rules/data` (SHA-256 verificati; coprono fino al 31/10/2026 20:45 UTC) e
+`pilot.db` / `trace.jsonl` della prova. Il risultato è **ipotetico**; i limiti (candele = prezzi di scambio, non mark;
+book non registrato; decisioni di Gemini dopo un'uscita ipotetica non simulabili) sono nel campo `limits`.
+La ricerca riproducibile su C1/C2/C3 è in `research/exit-rules/README.md`.
 
 ## 4. Controllo dello scheduler
 

@@ -290,6 +290,22 @@ export async function placeAIDrivenCryptoOrder(): Promise<void> {
             continue
           }
 
+          // Task 007C (off unless ALPHA_PROTECTION is C1/C2/C3): no reopen of the same coin and direction
+          // during the cooldown after a protective exit of the module
+          {
+            const { cooldownUntil, recordCooldownBlock } = await import('./positionProtection.js')
+            const blockedSide = direction === 'long' ? 'LONG' : 'SHORT'
+            const until = cooldownUntil(account.id, symbol, blockedSide)
+            if (until !== null) {
+              const msg = `Cannot open ${direction} position on ${symbol}: cooldown after a protective exit until ${new Date(until).toISOString()}`
+              logger.warning(msg)
+              recordCooldownBlock(account, symbol, blockedSide, until)
+              outcome('rejected', msg)
+              saveAIDecision(account, decision, portfolio, false)
+              continue
+            }
+          }
+
           const orderValue = account.currentCash * targetPortion
           quantity = round6(orderValue / price)
 

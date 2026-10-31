@@ -35,6 +35,9 @@ export const hyperliquidStub = {
   /** When true the l2Book request fails. */
   failBook: false,
   bookRequests: 0,
+  /** Raw candleSnapshot rows by coin (Task 007C: ATR of the exit rules); a coin without rows fails. */
+  candles: {} as Record<string, unknown[]>,
+  candleRequests: 0,
 }
 
 /** Replaces the exchange of the shared client and empties the price cache. */
@@ -64,6 +67,12 @@ export function installHyperliquidStub(): void {
         if (!mid) throw new Error(`stub: no price for ${coin}`)
         const level = [{ px: String(mid), sz: '1000000000', n: 1 }]
         return { coin, time: Date.now(), levels: [level, level] }
+      }
+      if (body.type === 'candleSnapshot') {
+        hyperliquidStub.candleRequests++
+        const coin = (body as any).req?.coin as string
+        if (!(coin in hyperliquidStub.candles)) throw new Error(`stub: no candles for ${coin}`)
+        return hyperliquidStub.candles[coin]
       }
       if (body.type !== 'meta') throw new Error(`stub: ${body.type} not served`)
       hyperliquidStub.metaRequests++

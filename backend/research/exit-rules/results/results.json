@@ -1,0 +1,749 @@
+{
+  "generated_by": "research/exit-rules/simulate.mts",
+  "engine": "src/services/exitRules.ts + exitPathSim.ts (the code the app runs)",
+  "data": {
+    "books.json": "7693fe9ff060d275030426386627b505d806ed787dabcae5266dd33ba0b33566",
+    "candles-15m.csv.gz": "d7d66ee0df576824e355ea5265ad65ecb5843dcfa58cf64f28bf9b76c2962dfd",
+    "funding-1h.csv.gz": "7637c1f65af5b838960680ad0bf512cc98d22639ef6a10d1cb34ad962ffd4226",
+    "meta.json": "135b7f6dda4cb82554c72724ba303afe0124f69da6499fcf241f2f6c62aea1db",
+    "oos-candles-1h.csv.gz": "852251a76e1dc5415062d3995e0bf2ac772779080c97005bc92378a5e93d85b2",
+    "oos-funding-1h.csv.gz": "25544d5335de551c68065356606d758e307fa3f6ad6745e6ae044c84162b8d0b"
+  },
+  "assumptions": {
+    "fee_each_side": 0.00045,
+    "half_spread_by_coin": {
+      "BNB": "0.142 bps",
+      "BTC": "0.065 bps",
+      "DOGE": "0.462 bps",
+      "ETH": "0.222 bps",
+      "SOL": "0.052 bps",
+      "XRP": "0.4 bps"
+    },
+    "stop_slippage_bps": [
+      2,
+      5
+    ],
+    "funding": "hourly rates of the period where recorded, otherwise the mean of the file",
+    "entries": "every 4 h, LONG and SHORT, all six markets; held at most 24 h; BASE = no exit rule, closed at 24 h",
+    "intrabar": "stop first when a bar touches both a stop and a target; gaps fill at the open",
+    "config": {
+      "mode": "C1|C2|C3",
+      "atrPeriod": 14,
+      "stopAtr": 2,
+      "trailAtr": 3,
+      "partialAtR": 1.5,
+      "partialFraction": 0.25,
+      "takeProfitR": 2,
+      "cooldownMs": 7200000,
+      "emergencyLossPctOfEquity": 0.03,
+      "referenceRiskPct": 0.01,
+      "stopSlippageBps": 2,
+      "retryBaseMs": 15000,
+      "retryMaxMs": 900000
+    }
+  },
+  "sets": {
+    "in_sample_15m": {
+      "description": "15 m bars, entries 2026-09-11 to 2026-10-25 (windows end before 2026-10-28): the window Task 007B used to choose C1/C2/C3",
+      "observations": {
+        "simulated_entries": 3180,
+        "entry_times": 1590,
+        "independent_calendar_days": 45,
+        "coin_days": 270,
+        "note": "LONG and SHORT of the same entry are mirror images and windows overlap (24 h held, one entry every 4 h): the bootstrap resamples whole calendar days, so the intervals reflect about the number of days, not the number of entries"
+      },
+      "configs": {
+        "BASE": {
+          "net_bps": {
+            "mean": -9.45,
+            "se": 0.01,
+            "ci95": [
+              -9.48,
+              -9.42
+            ]
+          },
+          "net_bps_slippage_5bps": -9.45,
+          "cost_bps": 9.22,
+          "tail_bps": {
+            "p05": -432.84,
+            "expected_shortfall_5pct": -633.14,
+            "worst": -1492.13
+          },
+          "win_rate": 0.48,
+          "exit_kinds": {
+            "time_exit": 1
+          },
+          "premature_stop_share": null,
+          "capture_of_3R_moves": 0.628,
+          "moves_3R": 399,
+          "mean_hold_h": 24,
+          "ambiguous_bars": 0
+        },
+        "C1": {
+          "net_bps": {
+            "mean": -0.63,
+            "se": 6.52,
+            "ci95": [
+              -13.18,
+              12.7
+            ]
+          },
+          "net_bps_slippage_5bps": -2.8,
+          "cost_bps": 10.66,
+          "tail_bps": {
+            "p05": -210.12,
+            "expected_shortfall_5pct": -262.7,
+            "worst": -480.46
+          },
+          "win_rate": 0.403,
+          "exit_kinds": {
+            "time_exit": 0.279,
+            "exit_stop": 0.303,
+            "exit_trailing": 0.418
+          },
+          "premature_stop_share": 0.054,
+          "capture_of_3R_moves": 0.505,
+          "moves_3R": 399,
+          "mean_hold_h": 13.8,
+          "ambiguous_bars": 0
+        },
+        "C2": {
+          "net_bps": {
+            "mean": -3.31,
+            "se": 5.46,
+            "ci95": [
+              -13.33,
+              8.12
+            ]
+          },
+          "net_bps_slippage_5bps": -5.18,
+          "cost_bps": 10.47,
+          "tail_bps": {
+            "p05": -224.96,
+            "expected_shortfall_5pct": -277.05,
+            "worst": -480.46
+          },
+          "win_rate": 0.44,
+          "exit_kinds": {
+            "time_exit": 0.322,
+            "exit_stop": 0.471,
+            "exit_trailing": 0.207
+          },
+          "premature_stop_share": 0.077,
+          "capture_of_3R_moves": 0.465,
+          "moves_3R": 399,
+          "mean_hold_h": 14.52,
+          "ambiguous_bars": 0
+        },
+        "C3": {
+          "net_bps": {
+            "mean": -0.54,
+            "se": 4.09,
+            "ci95": [
+              -8.91,
+              7.2
+            ]
+          },
+          "net_bps_slippage_5bps": -1.99,
+          "cost_bps": 10.19,
+          "tail_bps": {
+            "p05": -225.68,
+            "expected_shortfall_5pct": -279.26,
+            "worst": -480.46
+          },
+          "win_rate": 0.417,
+          "exit_kinds": {
+            "time_exit": 0.274,
+            "exit_stop": 0.485,
+            "exit_take_profit": 0.241
+          },
+          "premature_stop_share": 0.079,
+          "capture_of_3R_moves": 0.413,
+          "moves_3R": 399,
+          "mean_hold_h": 13.48,
+          "ambiguous_bars": 0
+        }
+      },
+      "paired_differences_bps": {
+        "C1-BASE": {
+          "mean_bps": 8.81,
+          "se": 6.65,
+          "ci95": [
+            -3.53,
+            22.55
+          ],
+          "share_better": 0.371
+        },
+        "C2-BASE": {
+          "mean_bps": 6.14,
+          "se": 5.24,
+          "ci95": [
+            -3.91,
+            16.26
+          ],
+          "share_better": 0.395
+        },
+        "C3-BASE": {
+          "mean_bps": 8.91,
+          "se": 4.18,
+          "ci95": [
+            0.71,
+            17.13
+          ],
+          "share_better": 0.381
+        },
+        "C1-C3": {
+          "mean_bps": -0.1,
+          "se": 4.11,
+          "ci95": [
+            -7.54,
+            8.22
+          ],
+          "share_better": 0.284
+        },
+        "C2-C3": {
+          "mean_bps": -2.77,
+          "se": 2.99,
+          "ci95": [
+            -8.51,
+            3.32
+          ],
+          "share_better": 0.137
+        },
+        "C1-C2": {
+          "mean_bps": 2.67,
+          "se": 1.68,
+          "ci95": [
+            -0.9,
+            5.77
+          ],
+          "share_better": 0.305
+        }
+      },
+      "risk_profiles": {
+        "BTC": {
+          "stop_2atr_pct_median": 0.972,
+          "max_notional_usdc_for_risk": {
+            "0.5%": 462,
+            "1%": 924,
+            "2%": 1848
+          }
+        },
+        "ETH": {
+          "stop_2atr_pct_median": 1.345,
+          "max_notional_usdc_for_risk": {
+            "0.5%": 344,
+            "1%": 687,
+            "2%": 1374
+          }
+        },
+        "SOL": {
+          "stop_2atr_pct_median": 1.692,
+          "max_notional_usdc_for_risk": {
+            "0.5%": 277,
+            "1%": 555,
+            "2%": 1110
+          }
+        },
+        "BNB": {
+          "stop_2atr_pct_median": 0.997,
+          "max_notional_usdc_for_risk": {
+            "0.5%": 452,
+            "1%": 903,
+            "2%": 1807
+          }
+        },
+        "XRP": {
+          "stop_2atr_pct_median": 1.727,
+          "max_notional_usdc_for_risk": {
+            "0.5%": 272,
+            "1%": 544,
+            "2%": 1089
+          }
+        },
+        "DOGE": {
+          "stop_2atr_pct_median": 1.794,
+          "max_notional_usdc_for_risk": {
+            "0.5%": 263,
+            "1%": 525,
+            "2%": 1050
+          }
+        }
+      },
+      "example_gemini_position": {
+        "position": "BTC LONG 0.00615 x 81168 (499 USDC), 3x, from the 006J-1 pilot",
+        "risk_at_stop_usdc": 5.4,
+        "risk_pct_of_1000": 0.54,
+        "set": "in_sample_15m"
+      }
+    },
+    "out_of_sample_1h": {
+      "description": "1 h bars, entries 2026-04-09 to 2026-09-07 (before any data Task 007B used); the path is coarser (1 h bars)",
+      "observations": {
+        "simulated_entries": 11004,
+        "entry_times": 5502,
+        "independent_calendar_days": 153,
+        "coin_days": 918,
+        "note": "LONG and SHORT of the same entry are mirror images and windows overlap (24 h held, one entry every 4 h): the bootstrap resamples whole calendar days, so the intervals reflect about the number of days, not the number of entries"
+      },
+      "configs": {
+        "BASE": {
+          "net_bps": {
+            "mean": -9.45,
+            "se": 0.01,
+            "ci95": [
+              -9.47,
+              -9.44
+            ]
+          },
+          "net_bps_slippage_5bps": -9.45,
+          "cost_bps": 9.23,
+          "tail_bps": {
+            "p05": -408.33,
+            "expected_shortfall_5pct": -621.02,
+            "worst": -2358.81
+          },
+          "win_rate": 0.476,
+          "exit_kinds": {
+            "time_exit": 1
+          },
+          "premature_stop_share": null,
+          "capture_of_3R_moves": 0.645,
+          "moves_3R": 1065,
+          "mean_hold_h": 24,
+          "ambiguous_bars": 0
+        },
+        "C1": {
+          "net_bps": {
+            "mean": -9.1,
+            "se": 3.26,
+            "ci95": [
+              -15.39,
+              -2.47
+            ]
+          },
+          "net_bps_slippage_5bps": -11.25,
+          "cost_bps": 10.77,
+          "tail_bps": {
+            "p05": -216.64,
+            "expected_shortfall_5pct": -281.14,
+            "worst": -607.9
+          },
+          "win_rate": 0.372,
+          "exit_kinds": {
+            "exit_trailing": 0.398,
+            "exit_stop": 0.319,
+            "time_exit": 0.283
+          },
+          "premature_stop_share": 0.056,
+          "capture_of_3R_moves": 0.437,
+          "moves_3R": 1065,
+          "mean_hold_h": 14.32,
+          "ambiguous_bars": 0
+        },
+        "C2": {
+          "net_bps": {
+            "mean": -7.62,
+            "se": 2.7,
+            "ci95": [
+              -12.83,
+              -2.12
+            ]
+          },
+          "net_bps_slippage_5bps": -9.45,
+          "cost_bps": 10.53,
+          "tail_bps": {
+            "p05": -223.65,
+            "expected_shortfall_5pct": -290.85,
+            "worst": -607.9
+          },
+          "win_rate": 0.428,
+          "exit_kinds": {
+            "exit_trailing": 0.169,
+            "exit_stop": 0.483,
+            "time_exit": 0.348
+          },
+          "premature_stop_share": 0.083,
+          "capture_of_3R_moves": 0.42,
+          "moves_3R": 1065,
+          "mean_hold_h": 15.23,
+          "ambiguous_bars": 4
+        },
+        "C3": {
+          "net_bps": {
+            "mean": -7.52,
+            "se": 2.25,
+            "ci95": [
+              -12,
+              -2.75
+            ]
+          },
+          "net_bps_slippage_5bps": -9.03,
+          "cost_bps": 10.28,
+          "tail_bps": {
+            "p05": -224.32,
+            "expected_shortfall_5pct": -291.37,
+            "worst": -607.9
+          },
+          "win_rate": 0.398,
+          "exit_kinds": {
+            "exit_take_profit": 0.19,
+            "exit_stop": 0.503,
+            "time_exit": 0.306
+          },
+          "premature_stop_share": 0.086,
+          "capture_of_3R_moves": 0.366,
+          "moves_3R": 1065,
+          "mean_hold_h": 14.45,
+          "ambiguous_bars": 0
+        }
+      },
+      "paired_differences_bps": {
+        "C1-BASE": {
+          "mean_bps": 0.35,
+          "se": 3.32,
+          "ci95": [
+            -5.87,
+            7.23
+          ],
+          "share_better": 0.338
+        },
+        "C2-BASE": {
+          "mean_bps": 1.83,
+          "se": 2.68,
+          "ci95": [
+            -3.1,
+            7.29
+          ],
+          "share_better": 0.373
+        },
+        "C3-BASE": {
+          "mean_bps": 1.94,
+          "se": 2.18,
+          "ci95": [
+            -2.13,
+            6.46
+          ],
+          "share_better": 0.342
+        },
+        "C1-C3": {
+          "mean_bps": -1.58,
+          "se": 2.3,
+          "ci95": [
+            -5.9,
+            3.1
+          ],
+          "share_better": 0.273
+        },
+        "C2-C3": {
+          "mean_bps": -0.11,
+          "se": 1.54,
+          "ci95": [
+            -2.96,
+            3.01
+          ],
+          "share_better": 0.148
+        },
+        "C1-C2": {
+          "mean_bps": -1.48,
+          "se": 0.98,
+          "ci95": [
+            -3.37,
+            0.39
+          ],
+          "share_better": 0.287
+        }
+      },
+      "risk_profiles": {
+        "BTC": {
+          "stop_2atr_pct_median": 1.057,
+          "max_notional_usdc_for_risk": {
+            "0.5%": 428,
+            "1%": 857,
+            "2%": 1714
+          }
+        },
+        "ETH": {
+          "stop_2atr_pct_median": 1.381,
+          "max_notional_usdc_for_risk": {
+            "0.5%": 335,
+            "1%": 671,
+            "2%": 1341
+          }
+        },
+        "SOL": {
+          "stop_2atr_pct_median": 1.552,
+          "max_notional_usdc_for_risk": {
+            "0.5%": 301,
+            "1%": 602,
+            "2%": 1203
+          }
+        },
+        "BNB": {
+          "stop_2atr_pct_median": 1.007,
+          "max_notional_usdc_for_risk": {
+            "0.5%": 448,
+            "1%": 895,
+            "2%": 1790
+          }
+        },
+        "XRP": {
+          "stop_2atr_pct_median": 1.34,
+          "max_notional_usdc_for_risk": {
+            "0.5%": 345,
+            "1%": 689,
+            "2%": 1379
+          }
+        },
+        "DOGE": {
+          "stop_2atr_pct_median": 1.562,
+          "max_notional_usdc_for_risk": {
+            "0.5%": 299,
+            "1%": 598,
+            "2%": 1196
+          }
+        }
+      },
+      "example_gemini_position": {
+        "position": "BTC LONG 0.00615 x 81168 (499 USDC), 3x, from the 006J-1 pilot",
+        "risk_at_stop_usdc": 5.83,
+        "risk_pct_of_1000": 0.583,
+        "set": "out_of_sample_1h"
+      }
+    },
+    "holdout_15m": {
+      "description": "15 m bars, entries from 2026-10-28 (includes the 30 Oct pilot day); 3.5 days, too short for conclusions",
+      "observations": {
+        "simulated_entries": 204,
+        "entry_times": 102,
+        "independent_calendar_days": 3,
+        "coin_days": 18,
+        "note": "LONG and SHORT of the same entry are mirror images and windows overlap (24 h held, one entry every 4 h): the bootstrap resamples whole calendar days, so the intervals reflect about the number of days, not the number of entries"
+      },
+      "configs": {
+        "BASE": {
+          "net_bps": {
+            "mean": -9.35,
+            "se": 0.04,
+            "ci95": [
+              -9.45,
+              -9.26
+            ]
+          },
+          "net_bps_slippage_5bps": -9.35,
+          "cost_bps": 9.13,
+          "tail_bps": {
+            "p05": -535.63,
+            "expected_shortfall_5pct": -622.32,
+            "worst": -720.89
+          },
+          "win_rate": 0.495,
+          "exit_kinds": {
+            "time_exit": 1
+          },
+          "premature_stop_share": null,
+          "capture_of_3R_moves": 0.584,
+          "moves_3R": 37,
+          "mean_hold_h": 24,
+          "ambiguous_bars": 0
+        },
+        "C1": {
+          "net_bps": {
+            "mean": -41.27,
+            "se": 8.26,
+            "ci95": [
+              -60.61,
+              -30.11
+            ]
+          },
+          "net_bps_slippage_5bps": -43.55,
+          "cost_bps": 10.71,
+          "tail_bps": {
+            "p05": -277.1,
+            "expected_shortfall_5pct": -304.78,
+            "worst": -357.96
+          },
+          "win_rate": 0.348,
+          "exit_kinds": {
+            "exit_trailing": 0.402,
+            "exit_stop": 0.358,
+            "time_exit": 0.24
+          },
+          "premature_stop_share": 0.181,
+          "capture_of_3R_moves": 0.029,
+          "moves_3R": 37,
+          "mean_hold_h": 10.76,
+          "ambiguous_bars": 0
+        },
+        "C2": {
+          "net_bps": {
+            "mean": -33.81,
+            "se": 11.21,
+            "ci95": [
+              -59.9,
+              -17.76
+            ]
+          },
+          "net_bps_slippage_5bps": -35.82,
+          "cost_bps": 10.56,
+          "tail_bps": {
+            "p05": -277.1,
+            "expected_shortfall_5pct": -304.78,
+            "worst": -357.96
+          },
+          "win_rate": 0.397,
+          "exit_kinds": {
+            "exit_stop": 0.49,
+            "exit_trailing": 0.24,
+            "time_exit": 0.27
+          },
+          "premature_stop_share": 0.225,
+          "capture_of_3R_moves": 0.063,
+          "moves_3R": 37,
+          "mean_hold_h": 11.59,
+          "ambiguous_bars": 0
+        },
+        "C3": {
+          "net_bps": {
+            "mean": -33.77,
+            "se": 3.93,
+            "ci95": [
+              -38.83,
+              -23.1
+            ]
+          },
+          "net_bps_slippage_5bps": -35.4,
+          "cost_bps": 10.3,
+          "tail_bps": {
+            "p05": -277.1,
+            "expected_shortfall_5pct": -304.78,
+            "worst": -357.96
+          },
+          "win_rate": 0.343,
+          "exit_kinds": {
+            "exit_stop": 0.544,
+            "exit_take_profit": 0.181,
+            "time_exit": 0.275
+          },
+          "premature_stop_share": 0.235,
+          "capture_of_3R_moves": 0.099,
+          "moves_3R": 37,
+          "mean_hold_h": 11.92,
+          "ambiguous_bars": 0
+        }
+      },
+      "paired_differences_bps": {
+        "C1-BASE": {
+          "mean_bps": -31.92,
+          "se": 8.18,
+          "ci95": [
+            -51.25,
+            -20.66
+          ],
+          "share_better": 0.319
+        },
+        "C2-BASE": {
+          "mean_bps": -24.46,
+          "se": 11.19,
+          "ci95": [
+            -50.54,
+            -8.49
+          ],
+          "share_better": 0.328
+        },
+        "C3-BASE": {
+          "mean_bps": -24.42,
+          "se": 3.97,
+          "ci95": [
+            -29.47,
+            -13.64
+          ],
+          "share_better": 0.319
+        },
+        "C1-C3": {
+          "mean_bps": -7.5,
+          "se": 7.02,
+          "ci95": [
+            -21.78,
+            6.37
+          ],
+          "share_better": 0.216
+        },
+        "C2-C3": {
+          "mean_bps": -0.04,
+          "se": 10.12,
+          "ci95": [
+            -21.07,
+            19.85
+          ],
+          "share_better": 0.103
+        },
+        "C1-C2": {
+          "mean_bps": -7.46,
+          "se": 3.15,
+          "ci95": [
+            -13.48,
+            -0.71
+          ],
+          "share_better": 0.172
+        }
+      },
+      "risk_profiles": {
+        "BTC": {
+          "stop_2atr_pct_median": 1.077,
+          "max_notional_usdc_for_risk": {
+            "0.5%": 421,
+            "1%": 843,
+            "2%": 1685
+          }
+        },
+        "ETH": {
+          "stop_2atr_pct_median": 1.497,
+          "max_notional_usdc_for_risk": {
+            "0.5%": 311,
+            "1%": 622,
+            "2%": 1244
+          }
+        },
+        "SOL": {
+          "stop_2atr_pct_median": 1.658,
+          "max_notional_usdc_for_risk": {
+            "0.5%": 283,
+            "1%": 566,
+            "2%": 1131
+          }
+        },
+        "BNB": {
+          "stop_2atr_pct_median": 1.439,
+          "max_notional_usdc_for_risk": {
+            "0.5%": 323,
+            "1%": 646,
+            "2%": 1291
+          }
+        },
+        "XRP": {
+          "stop_2atr_pct_median": 1.578,
+          "max_notional_usdc_for_risk": {
+            "0.5%": 296,
+            "1%": 592,
+            "2%": 1185
+          }
+        },
+        "DOGE": {
+          "stop_2atr_pct_median": 1.697,
+          "max_notional_usdc_for_risk": {
+            "0.5%": 277,
+            "1%": 553,
+            "2%": 1107
+          }
+        }
+      },
+      "example_gemini_position": {
+        "position": "BTC LONG 0.00615 x 81168 (499 USDC), 3x, from the 006J-1 pilot",
+        "risk_at_stop_usdc": 5.93,
+        "risk_pct_of_1000": 0.593,
+        "set": "holdout_15m"
+      }
+    }
+  }
+}

@@ -69,12 +69,12 @@ const bookFillRows = hasBookFills
   ? db.prepare('SELECT * FROM book_fills WHERE account_id=? ORDER BY id').all(accountId)
   : [] // database precedenti al 006I-5: esecuzione al mid
 const hasTable = (n) => Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(n))
-// Task 007A: decisions of the profit protection module (tables exist from the experimental branch on)
-const protectionRows = hasTable('protection_events')
-  ? db.prepare('SELECT * FROM protection_events WHERE account_id=? ORDER BY triggered_at, id').all(accountId)
+// Task 007C: exit plans and every intervention of the exit module (tables exist from the experimental branch on)
+const exitPlanRows = hasTable('exit_plans')
+  ? db.prepare('SELECT * FROM exit_plans WHERE account_id=? ORDER BY opened_at, plan_seq').all(accountId)
   : []
-const protectionStates = hasTable('position_protection')
-  ? db.prepare('SELECT * FROM position_protection WHERE account_id=? ORDER BY opened_at').all(accountId)
+const exitEventRows = hasTable('exit_events')
+  ? db.prepare('SELECT * FROM exit_events WHERE account_id=? ORDER BY at, id').all(accountId)
   : []
 const fundingRows = hasFunding
   ? db.prepare('SELECT * FROM funding_payments WHERE account_id=? ORDER BY funding_time, symbol').all(accountId)
@@ -409,29 +409,42 @@ return {
   // Le uscite per protezione sono ordini PRT- eseguiti dal motore come ogni chiusura: commissioni e P&L sono
   // gia nei valori sopra. HOLD e CLOSE dell'AI restano in decisions; qui la cronologia unica.
   experiment: experiment ?? null,
-  protection: {
-    events: protectionRows.map((e) => ({
-      at: new Date(e.triggered_at).toISOString(), symbol: e.symbol, side: e.side, kind: e.kind, status: e.status,
-      mark: e.mark_price, net_pnl: r(e.net_pnl, 6), peak_net: r(e.peak_net, 6), floor: r(e.floor, 6), risk_usdc: r(e.risk_usdc, 6),
-      r_multiple: r(e.r_multiple, 4), stage: e.stage, fraction: e.fraction, quantity: e.quantity_requested,
-      filled: e.filled_quantity, fill_price: e.fill_price, order_no: e.order_no, reason: e.reason,
+  exit_management: {
+    plans: exitPlanRows.map((p) => ({
+      symbol: p.symbol, side: p.side, mode: p.mode, plan_seq: p.plan_seq, opened_at: new Date(p.opened_at).toISOString(),
+      entry: p.entry, atr: p.atr, atr_as_of: new Date(p.atr_as_of).toISOString(), stop: p.stop_price, risk_price: p.risk_price,
+      trail_distance: p.trail_distance, take_profit: p.take_profit_price, partial_at: p.partial_price, partial: p.partial_state,
+      best: p.best, risk_usdc: r(p.risk_usdc, 6), risk_pct: r(p.risk_pct * 100, 4), oversized: p.oversized === 1,
+      status: p.status, last_level: p.last_level, last_level_kind: p.last_level_kind,
     })),
-    counts: protectionRows.reduce((m, e) => ((m[`${e.kind}:${e.status}`] = (m[`${e.kind}:${e.status}`] ?? 0) + 1), m), {}),
-    positions: protectionStates.map((p) => ({
-      symbol: p.symbol, side: p.side, opened_at: new Date(p.opened_at).toISOString(), risk_usdc: r(p.risk_usdc, 6),
-      stage: p.stage, peak_net: r(p.peak_net, 6), partial_exits: p.partial_exits, last_net: p.last_net === null ? null : r(p.last_net, 6),
-      last_floor: p.last_floor === null ? null : r(p.last_floor, 6), closed_at: p.closed_at === null ? null : new Date(p.closed_at).toISOString(),
+    events: exitEventRows.map((e) => ({
+      at: new Date(e.at).toISOString(), symbol: e.symbol, side: e.side, kind: e.kind, status: e.status, mode: e.mode,
+      mark: e.mark, level: e.level, fraction: e.fraction, requested: e.quantity_requested, filled: e.quantity_filled,
+      fill_price: e.fill_price, slippage_vs_mark_bps: e.slippage_vs_mark_bps === null ? null : r(e.slippage_vs_mark_bps, 3),
+      net_at_trigger: e.net_at_trigger === null ? null : r(e.net_at_trigger, 6), closed_position: e.closed_position === 1,
+      order_no: e.order_no, reason: e.reason,
     })),
-    note: 'stage 0 = limite di perdita (-R), 1 = pareggio dopo +1R, 2 = trailing dopo +2R (valori di default, ipotesi a priori); netto = P&L non realizzato + realizzato - commissioni - commissione di uscita stimata + funding; spread e profondita dell\'uscita non sono nel netto stimato (l\'esecuzione reale li include)',
+    counts: exitEventRows.reduce((m, e) => ((m[`${e.kind}:${e.status}`] = (m[`${e.kind}:${e.status}`] ?? 0) + 1), m), {}),
+    // rischio sul capitale delle posizioni scelte da Gemini (sizing invariato): riferimento 1%, profili 0,5 / 1 / 2%
+    risk: {
+      positions: exitPlanRows.filter((p) => p.plan_seq === 1 || p.status !== 'superseded').length,
+      oversized: exitPlanRows.filter((p) => p.oversized === 1).length,
+      risk_pct_at_stop: exitPlanRows.map((p) => r(p.risk_pct * 100, 4)),
+      fits: Object.fromEntries([0.005, 0.01, 0.02].map((q) => [`${q * 100}%`, exitPlanRows.filter((p) => p.risk_pct <= q).length])),
+      reference_pct: 1,
+    },
+    note: 'C1 stop 2 ATR(14, 1h) + chandelier 3 ATR; C2 stop 2 ATR, 25% a +1,5R, poi pareggio + chandelier 3 ATR; C3 stop 2 ATR, take profit +2R. ' +
+      'ATR solo da barre 1h chiuse prima del primo fill; livelli verificati al mark price ogni 5 s; le uscite sono ordini PRT- eseguiti dal motore ' +
+      'sul book (commissioni, spread e P&L gia nei valori sopra); slippage_vs_mark_bps = costo del book oltre il mark',
   },
   decision_trace: [
     ...decisions.map((d) => ({
       at: new Date(dbMs(d.decision_time)).toISOString(), source: 'ai', action: d.operation, symbol: d.symbol ?? null,
       executed: d.executed === 'true', detail: String(d.reason ?? '').slice(0, 160),
     })),
-    ...protectionRows.filter((e) => e.kind.startsWith('exit_')).map((e) => ({
-      at: new Date(e.triggered_at).toISOString(), source: 'protection', action: e.kind === 'exit_risk' ? 'exit_risk' : 'exit_profit_protection',
-      symbol: e.symbol, executed: e.status === 'executed' || e.status === 'partial', detail: e.reason.slice(0, 160),
+    ...exitEventRows.filter((e) => e.kind.startsWith('exit_') || e.kind === 'partial_take_profit' || e.kind === 'cooldown_block').map((e) => ({
+      at: new Date(e.at).toISOString(), source: 'exits', action: e.kind, symbol: e.symbol,
+      executed: e.status === 'executed' || e.status === 'book_partial', detail: e.reason.slice(0, 160),
     })),
   ].sort((a, b) => a.at.localeCompare(b.at)),
   // Confronto a posteriori Originale vs Hyperliquid sugli stessi fill (006I-6): sezione separata, non

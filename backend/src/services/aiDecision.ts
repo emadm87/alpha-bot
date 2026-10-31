@@ -14,8 +14,8 @@ import { calcAccountEquity } from './assetCalculator.js'
 import { recordAICycle } from './aiDiagnostics.js'
 import { fetchLatestNews } from './newsFeed.js'
 import { calculatePositionInterest } from './orderExecutorLeverage.js'
-import { buildPositionView, currentPriceFor } from './positionProtection.js'
-import { positionInfoVersion } from './profitProtection.js'
+import { activeCooldowns, buildPositionView, currentPriceFor } from './positionProtection.js'
+import { positionInfoVersion } from './exitRules.js'
 import { getLogger } from '../utils/logger.js'
 
 const logger = getLogger('services.aiDecision')
@@ -52,6 +52,8 @@ export interface Portfolio {
   frozen_cash: number
   positions: Record<string, PortfolioPosition>
   total_assets: number
+  /** v2 with the exit module on: reopens blocked by the cooldown after a protective exit (Task 007C). */
+  cooldowns?: { symbol: string; side: string; until: string }[]
 }
 
 export interface AIDecision {
@@ -107,6 +109,7 @@ export async function getPortfolioData(account: Account): Promise<Portfolio> {
     frozen_cash: account.frozenCash,
     positions: portfolio,
     total_assets: (await calcAccountEquity(account)).equity,
+    ...(v2 ? { cooldowns: activeCooldowns(account.id) } : {}),
   }
 }
 
@@ -116,7 +119,7 @@ const POSITIONS_HEADER_V2 =
   'current_price, current_value (quantity x current_price), unrealized_pnl, margin, fees_paid (paid so far on this position), ' +
   'estimated_exit_fee, financing_net (funding settled, or interest, so far; negative = paid), realized_pnl_partial_closes, ' +
   'estimated_net_pnl_if_closed_now (unrealized P&L + realized - fees - exit fee + financing; exit spread not included), ' +
-  'return_on_margin_pct, opened_at, holding_minutes'
+  'return_on_margin_pct, opened_at, holding_minutes; exit_plan when the exit module is on (stop, exit level, take profit, partial, risk at the stop)'
 
 export function buildPrompt(
   portfolio: Portfolio,
@@ -131,7 +134,8 @@ Portfolio Data:
 - Frozen Cash: $${portfolio.frozen_cash.toFixed(2)}
 - Total Assets: $${portfolio.total_assets.toFixed(2)}
 - Current Positions (${positionsHeader}):
-${JSON.stringify(portfolio.positions, null, 2)}
+${JSON.stringify(portfolio.positions, null, 2)}${portfolio.cooldowns?.length ? `
+- Reopening blocked after a protective exit (cooldown): ${portfolio.cooldowns.map((c) => `${c.symbol} ${c.side} until ${c.until}`).join('; ')}` : ''}
 
 Current Market Prices:
 ${JSON.stringify(prices, null, 2)}

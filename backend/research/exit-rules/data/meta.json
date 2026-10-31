@@ -1,0 +1,26 @@
+{
+ "BNB": {
+  "maxLeverage": 10,
+  "szDecimals": 3
+ },
+ "BTC": {
+  "maxLeverage": 40,
+  "szDecimals": 5
+ },
+ "DOGE": {
+  "maxLeverage": 10,
+  "szDecimals": 0
+ },
+ "ETH": {
+  "maxLeverage": 25,
+  "szDecimals": 4
+ },
+ "SOL": {
+  "maxLeverage": 20,
+  "szDecimals": 2
+ },
+ "XRP": {
+  "maxLeverage": 20,
+  "szDecimals": 0
+ }
+}

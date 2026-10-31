@@ -231,6 +231,14 @@ async function loadCandles(symbol: string, timeframe: Timeframe, now: number): P
   return request
 }
 
+/**
+ * 15 m candles of a symbol from the shared cache (one request per symbol and
+ * closed bar at most, with the same backoff). Task 007C: ATR of the exit rules.
+ */
+export async function cachedCandles15m(symbol: string, now = Date.now()): Promise<Candle[]> {
+  return (await loadCandles(symbol, '15m', now)).candles
+}
+
 const REQUIRED: (keyof IndicatorSnapshot)[] = [
   'ema20', 'ema50', 'rsi14', 'macd', 'macdSignal', 'macdHistogram', 'atr14', 'relativeVolume20',
 ]

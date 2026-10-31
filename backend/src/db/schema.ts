@@ -239,62 +239,83 @@ export const liquidationEvents = sqliteTable('liquidation_events', {
 })
 
 /**
- * Profit protection state of an open position (Task 007A): one row per
- * position lifecycle, keyed by the time its first fill happened.
+ * Exit plan of an open position (Task 007C): levels fixed when the plan is
+ * made (ATR from 1 h bars closed before the first fill), the best price seen,
+ * the partial state, the risk at the stop and the retry state. One row per
+ * plan; a position whose size grows gets a new plan (plan_seq + 1).
  */
-export const positionProtection = sqliteTable('position_protection', {
+export const exitPlans = sqliteTable('exit_plans', {
   accountId: integer('account_id').notNull(),
   symbol: text('symbol').notNull(),
-  /** ms since epoch of the first fill of this position. */
+  /** ms since epoch of the first fill of the position. */
   openedAt: integer('opened_at').notNull(),
+  planSeq: integer('plan_seq').notNull(),
+  mode: text('mode').notNull(),
   side: text('side').notNull(),
-  /** R: the loss the position is allowed, USDC. */
-  riskUsdc: real('risk_usdc').notNull(),
-  /** Account value without unrealized P&L when the position was first seen. */
+  entry: real('entry').notNull(),
+  atr: real('atr').notNull(),
+  atrAsOf: integer('atr_as_of').notNull(),
+  stopPrice: real('stop_price').notNull(),
+  riskPrice: real('risk_price').notNull(),
+  trailDistance: real('trail_distance').notNull(),
+  takeProfitPrice: real('take_profit_price'),
+  partialPrice: real('partial_price'),
+  partialFraction: real('partial_fraction').notNull(),
+  /** 'pending' | 'done' | 'skipped' | 'n/a' */
+  partialState: text('partial_state').notNull(),
+  best: real('best').notNull(),
+  /** Quantity the plan manages (reduced by partial closes). */
+  plannedQty: real('planned_qty').notNull(),
   equityBase: real('equity_base').notNull(),
-  stage: integer('stage').notNull(),
-  peakNet: real('peak_net').notNull(),
-  partialExits: integer('partial_exits').notNull(),
-  lastNet: real('last_net'),
-  lastFloor: real('last_floor'),
+  riskUsdc: real('risk_usdc').notNull(),
+  riskPct: real('risk_pct').notNull(),
+  oversized: integer('oversized').notNull(),
+  /** 'active' | 'closed' | 'superseded' */
+  status: text('status').notNull(),
+  failures: integer('failures').notNull(),
+  nextAttemptAt: integer('next_attempt_at'),
   lastMark: real('last_mark'),
-  lastExitAttempt: integer('last_exit_attempt'),
+  lastLevel: real('last_level'),
+  lastLevelKind: text('last_level_kind'),
+  createdAt: integer('created_at').notNull(),
   updatedAt: integer('updated_at').notNull(),
   closedAt: integer('closed_at'),
 })
 
 /**
- * Every decision of the profit protection module that changed something
- * (Task 007A): stage changes ('breakeven_armed', 'trailing_armed') and exits
- * ('exit_risk', 'exit_profit_protection'), executed or failed, with the
- * numbers they used. HOLD and AI closes stay in ai_decision_logs.
+ * Every intervention and decision of the exit module (Task 007C): plans
+ * (created, reset, unavailable), partials (done or skipped), exits (stop,
+ * break-even, trailing, take profit, emergency; executed, book_partial or
+ * failed) and AI opens blocked by the cooldown. HOLD and AI closes stay in
+ * ai_decision_logs.
  */
-export const protectionEvents = sqliteTable('protection_events', {
+export const exitEvents = sqliteTable('exit_events', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   accountId: integer('account_id').notNull(),
   symbol: text('symbol').notNull(),
   side: text('side').notNull(),
-  openedAt: integer('opened_at').notNull(),
+  openedAt: integer('opened_at'),
+  planSeq: integer('plan_seq'),
   /** ms since epoch */
-  triggeredAt: integer('triggered_at').notNull(),
-  /** 'breakeven_armed' | 'trailing_armed' | 'exit_risk' | 'exit_profit_protection' */
+  at: integer('at').notNull(),
   kind: text('kind').notNull(),
-  /** 'info' (stage change) | 'executed' | 'partial' | 'failed' */
+  /** 'info' | 'executed' | 'book_partial' | 'failed' | 'skipped' | 'blocked' */
   status: text('status').notNull(),
-  markPrice: real('mark_price').notNull(),
-  netPnl: real('net_pnl').notNull(),
-  peakNet: real('peak_net').notNull(),
-  floor: real('floor').notNull(),
-  riskUsdc: real('risk_usdc').notNull(),
-  rMultiple: real('r_multiple').notNull(),
-  stage: integer('stage').notNull(),
+  mode: text('mode'),
+  mark: real('mark'),
+  level: real('level'),
   fraction: real('fraction'),
   quantityRequested: real('quantity_requested'),
-  orderNo: text('order_no'),
-  filledQuantity: real('filled_quantity'),
+  quantityFilled: real('quantity_filled'),
   fillPrice: real('fill_price'),
+  /** (fill - mark) / mark against the position, bps: what the book cost beyond the mark. */
+  slippageVsMarkBps: real('slippage_vs_mark_bps'),
+  netAtTrigger: real('net_at_trigger'),
+  /** 1 when this event left the position flat (starts the cooldown). */
+  closedPosition: integer('closed_position').notNull(),
+  orderNo: text('order_no'),
   reason: text('reason').notNull(),
-  /** JSON: the input of the rules and the configuration used. */
+  /** JSON: plan, inputs, risk assessment, error. */
   detail: text('detail').notNull(),
 })
 

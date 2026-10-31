@@ -1,0 +1,59 @@
+{
+  "files": {
+    "books.json": {
+      "description": "three l2Book snapshots per coin, top 5 levels, taken at fetch time (spread and depth now, not historical)",
+      "fetched_at": "2026-10-31T21:00:00Z",
+      "request": "l2Book {coin}",
+      "sha256": "7693fe9ff060d275030426386627b505d806ed787dabcae5266dd33ba0b33566",
+      "source": "POST https://api.hyperliquid.xyz/info (public, read-only)",
+      "used_for": "half spread per coin"
+    },
+    "candles-15m.csv.gz": {
+      "description": "15 m candles, latest 5000 per coin (Hyperliquid serves no older 15 m bars); the last bar of each coin was still forming at fetch time and is dropped by the loader",
+      "fetched_at": "2026-10-31T20:57:58.130Z",
+      "first_bar": "2026-09-09T18:45:00.000Z",
+      "last_bar": "2026-10-31T20:45:00.000Z",
+      "request": "candleSnapshot {coin, interval: 15m, startTime: now - 5000 x 15 min, endTime: now}",
+      "sha256": "d7d66ee0df576824e355ea5265ad65ecb5843dcfa58cf64f28bf9b76c2962dfd",
+      "source": "POST https://api.hyperliquid.xyz/info (public, read-only)",
+      "used_for": "Task 007B calibration (entries up to 2026-10-27) and Task 007C in-sample; 2026-10-28 onwards is the hold-out (30 Oct pilot day)"
+    },
+    "funding-1h.csv.gz": {
+      "description": "hourly funding rates, 20 days",
+      "fetched_at": "2026-10-31T20:57:58.130Z",
+      "request": "fundingHistory {coin, startTime: now - 20 d}",
+      "sha256": "7637c1f65af5b838960680ad0bf512cc98d22639ef6a10d1cb34ad962ffd4226",
+      "source": "POST https://api.hyperliquid.xyz/info (public, read-only)",
+      "used_for": "funding costs of the 15 m sets (hours before 2026-10-11 use the coin mean)"
+    },
+    "meta.json": {
+      "description": "szDecimals and maxLeverage of the six markets",
+      "fetched_at": "2026-10-31T20:57:58.130Z",
+      "request": "meta",
+      "sha256": "135b7f6dda4cb82554c72724ba303afe0124f69da6499fcf241f2f6c62aea1db",
+      "source": "POST https://api.hyperliquid.xyz/info (public, read-only)",
+      "used_for": "order precision"
+    },
+    "oos-candles-1h.csv.gz": {
+      "description": "1h candles (latest 5000 per coin; Hyperliquid serves no older bars)",
+      "fetched_at": "2026-10-31T21:59:15.125Z",
+      "first_bar": "2026-04-06T13:00:00.000Z",
+      "last_bar": "2026-10-31T21:00:00.000Z",
+      "request": "candleSnapshot {coin, interval: 1h, last 5000}",
+      "sha256": "852251a76e1dc5415062d3995e0bf2ac772779080c97005bc92378a5e93d85b2",
+      "source": "POST https://api.hyperliquid.xyz/info (public, read-only)",
+      "used_for": "Task 007C out-of-sample: entries before 2026-09-09 only (never used to choose the parameters)"
+    },
+    "oos-funding-1h.csv.gz": {
+      "description": "hourly funding (fundingHistory)",
+      "fetched_at": "2026-10-31T21:59:15.125Z",
+      "first_bar": "2026-04-06T13:00:00.000Z",
+      "last_bar": "2026-10-31T21:00:00.000Z",
+      "request": "fundingHistory paged from the first 1 h bar",
+      "sha256": "25544d5335de551c68065356606d758e307fa3f6ad6745e6ae044c84162b8d0b",
+      "source": "POST https://api.hyperliquid.xyz/info (public, read-only)",
+      "used_for": "Task 007C out-of-sample: entries before 2026-09-09 only (never used to choose the parameters)"
+    }
+  },
+  "note": "Public Hyperliquid market data, no credentials. Checked by lib.mts before every run: a changed file stops the run."
+}
