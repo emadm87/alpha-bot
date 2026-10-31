@@ -1,0 +1,6 @@
+# Research data of backend/research/exit-rules is verified byte for byte (SHA-256 in data/MANIFEST.json):
+# git must never convert its line endings (core.autocrlf=true on Windows turned LF into CRLF and broke
+# the checksums of MANIFEST.json, books.json and meta.json). -text = stored and checked out unchanged.
+backend/research/exit-rules/data/** -text
+# Generated results are compared byte for byte with a re-run (which writes LF): always LF in the checkout.
+backend/research/exit-rules/results/** text eol=lf

@@ -17,8 +17,17 @@ export function verifiedManifest(dir = DATA_DIR): Manifest {
   for (const [name, f] of Object.entries(manifest.files)) {
     const file = path.join(dir, name)
     if (!fs.existsSync(file)) throw new Error(`data file missing: ${name}`)
-    const got = crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex')
-    if (got !== f.sha256) throw new Error(`integrity check failed for ${name}: sha256 ${got}, manifest ${f.sha256}`)
+    const bytes = fs.readFileSync(file)
+    const got = crypto.createHash('sha256').update(bytes).digest('hex')
+    if (got !== f.sha256) {
+      // the most common cause on Windows: a checkout that converted LF to CRLF (the checksum stays mandatory)
+      const lf = Buffer.from(bytes.toString('latin1').replace(/\r\n/g, '\n'), 'latin1')
+      const crlf = bytes.includes(13) && crypto.createHash('sha256').update(lf).digest('hex') === f.sha256
+      throw new Error(`integrity check failed for ${name}: sha256 ${got}, manifest ${f.sha256}` + (crlf
+        ? '. The file has Windows line endings (CRLF) and matches the manifest with LF: it was converted at checkout. ' +
+          'Restore it as committed: git checkout -- backend/research/exit-rules/data (the repository .gitattributes prevents the conversion)'
+        : ''))
+    }
   }
   return manifest
 }
