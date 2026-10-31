@@ -406,7 +406,16 @@ export class TaskScheduler {
       hyperliquidSkipStreak.delete(accountId)
       hyperliquidSkips.delete(accountId)
       const state = result.state
-      if (!state.liquidatable) return
+      if (!state.liquidatable) {
+        // Task 007A (off unless ALPHA_PROTECTION=on): profit protection and risk exits at the same fresh marks
+        try {
+          const { runProtectionPass } = await import('./positionProtection.js')
+          await runProtectionPass(account, rows, result.input.markPrices)
+        } catch (e) {
+          logger.error(`Profit protection not run for account ${account.name}: ${e}`) // never disturbs the monitor
+        }
+        return
+      }
 
       logger.warning(
         `⚠️ HYPERLIQUID LIQUIDATION: account ${account.name} value ${state.accountValue!.toFixed(4)} < ` +

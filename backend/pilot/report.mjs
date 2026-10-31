@@ -40,7 +40,7 @@ const MODEL_NOTES = {
     'backstop della vault di liquidazione',
 }
 
-export function buildReport({ dbFile, traceFile, accountId: requested, prices, at, priceIn, priceOut }) {
+export function buildReport({ dbFile, traceFile, accountId: requested, prices, at, priceIn, priceOut, experiment }) {
 const db = new Database(dbFile, { readonly: true, fileMustExist: true })
 try {
 const dbMs = (s) => (s ? Date.parse(s.includes('T') ? s : s.replace(' ', 'T') + 'Z') : NaN)
@@ -68,6 +68,14 @@ const hasBookFills = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' 
 const bookFillRows = hasBookFills
   ? db.prepare('SELECT * FROM book_fills WHERE account_id=? ORDER BY id').all(accountId)
   : [] // database precedenti al 006I-5: esecuzione al mid
+const hasTable = (n) => Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(n))
+// Task 007A: decisions of the profit protection module (tables exist from the experimental branch on)
+const protectionRows = hasTable('protection_events')
+  ? db.prepare('SELECT * FROM protection_events WHERE account_id=? ORDER BY triggered_at, id').all(accountId)
+  : []
+const protectionStates = hasTable('position_protection')
+  ? db.prepare('SELECT * FROM position_protection WHERE account_id=? ORDER BY opened_at').all(accountId)
+  : []
 const fundingRows = hasFunding
   ? db.prepare('SELECT * FROM funding_payments WHERE account_id=? ORDER BY funding_time, symbol').all(accountId)
   : [] // database precedenti al 006I-2: nessun funding
@@ -397,6 +405,35 @@ return {
   benchmarks: { hold_usdc: acc.initial_capital, btc_buy_and_hold_1x_usdc: r(btcBH), btc_from: p0 ?? null, btc_to: p1 ?? null },
   reconciliation: { cash_expected: r(cashExpected, 6), cash_recorded: r(acc.current_cash, 6), ok: issues.length === 0 },
   issues,
+  // Task 007A: variante sperimentale (informazioni sulla posizione, protezione del profitto) e sue decisioni.
+  // Le uscite per protezione sono ordini PRT- eseguiti dal motore come ogni chiusura: commissioni e P&L sono
+  // gia nei valori sopra. HOLD e CLOSE dell'AI restano in decisions; qui la cronologia unica.
+  experiment: experiment ?? null,
+  protection: {
+    events: protectionRows.map((e) => ({
+      at: new Date(e.triggered_at).toISOString(), symbol: e.symbol, side: e.side, kind: e.kind, status: e.status,
+      mark: e.mark_price, net_pnl: r(e.net_pnl, 6), peak_net: r(e.peak_net, 6), floor: r(e.floor, 6), risk_usdc: r(e.risk_usdc, 6),
+      r_multiple: r(e.r_multiple, 4), stage: e.stage, fraction: e.fraction, quantity: e.quantity_requested,
+      filled: e.filled_quantity, fill_price: e.fill_price, order_no: e.order_no, reason: e.reason,
+    })),
+    counts: protectionRows.reduce((m, e) => ((m[`${e.kind}:${e.status}`] = (m[`${e.kind}:${e.status}`] ?? 0) + 1), m), {}),
+    positions: protectionStates.map((p) => ({
+      symbol: p.symbol, side: p.side, opened_at: new Date(p.opened_at).toISOString(), risk_usdc: r(p.risk_usdc, 6),
+      stage: p.stage, peak_net: r(p.peak_net, 6), partial_exits: p.partial_exits, last_net: p.last_net === null ? null : r(p.last_net, 6),
+      last_floor: p.last_floor === null ? null : r(p.last_floor, 6), closed_at: p.closed_at === null ? null : new Date(p.closed_at).toISOString(),
+    })),
+    note: 'stage 0 = limite di perdita (-R), 1 = pareggio dopo +1R, 2 = trailing dopo +2R (valori di default, ipotesi a priori); netto = P&L non realizzato + realizzato - commissioni - commissione di uscita stimata + funding; spread e profondita dell\'uscita non sono nel netto stimato (l\'esecuzione reale li include)',
+  },
+  decision_trace: [
+    ...decisions.map((d) => ({
+      at: new Date(dbMs(d.decision_time)).toISOString(), source: 'ai', action: d.operation, symbol: d.symbol ?? null,
+      executed: d.executed === 'true', detail: String(d.reason ?? '').slice(0, 160),
+    })),
+    ...protectionRows.filter((e) => e.kind.startsWith('exit_')).map((e) => ({
+      at: new Date(e.triggered_at).toISOString(), source: 'protection', action: e.kind === 'exit_risk' ? 'exit_risk' : 'exit_profit_protection',
+      symbol: e.symbol, executed: e.status === 'executed' || e.status === 'partial', detail: e.reason.slice(0, 160),
+    })),
+  ].sort((a, b) => a.at.localeCompare(b.at)),
   // Confronto a posteriori Originale vs Hyperliquid sugli stessi fill (006I-6): sezione separata, non
   // modifica i valori sopra; le sue anomalie restano in comparison.issues
   comparison: buildComparison({

@@ -20,6 +20,9 @@
 //                                      commissione 0,045%, funding orario, mark price, cross margin, book
 //   --guard on | off                   sorveglianza Hyperliquid (hl-guard.mjs, default on)
 //   --recon-ms 120000                  intervallo dei controlli di riconciliazione del guard
+//   --position-info v1 | v2            informazioni sulla posizione inviate all'AI (007A; v1 = originale)
+//   --protection off | on              protezione del profitto e del rischio, solo modello hyperliquid (007A)
+//   --protection-config '{"giveBackFraction":0.4}'  parametri diversi dai default (JSON, convalidato dall'app)
 //
 // Chiave AI (--key-mode env): il conto contiene solo il segnaposto; la chiave viene aggiunta alle sole
 // richieste verso l'host AI dal preload key-inject.mjs nel processo dell'app (mai nel database o nei log).
@@ -67,6 +70,10 @@ const cfg = {
   startupMs: Number(flag('--startup-ms', 180_000)),
   guard: flag('--guard', 'on'),
   reconMs: Number(flag('--recon-ms', 120_000)),
+  // variante sperimentale (007A): valore effettivo = opzione, altrimenti ambiente, altrimenti originale
+  positionInfo: flag('--position-info', process.env.ALPHA_POSITION_INFO ?? 'v1').toLowerCase(),
+  protection: flag('--protection', process.env.ALPHA_PROTECTION ?? 'off').toLowerCase(),
+  protectionConfig: flag('--protection-config', process.env.ALPHA_PROTECTION_CONFIG ?? ''),
 }
 const PLACEHOLDER_KEY = 'network-secret-placeholder'
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -82,6 +89,21 @@ if (!cfg.runDir) fail(64, 'manca --run-dir (cartella nuova per database, log e t
 if (!['network-secret', 'env'].includes(cfg.keyMode)) fail(64, `--key-mode non valido: ${cfg.keyMode}`)
 if (!['original', 'hyperliquid'].includes(cfg.costModel)) fail(64, `--cost-model non valido: ${cfg.costModel}`)
 if (!['on', 'off'].includes(cfg.guard)) fail(64, `--guard non valido: ${cfg.guard}`)
+if (!['v1', 'v2'].includes(cfg.positionInfo)) fail(64, `--position-info non valido: ${cfg.positionInfo}`)
+if (!['on', 'off'].includes(cfg.protection)) fail(64, `--protection non valido: ${cfg.protection}`)
+if (cfg.protectionConfig) {
+  try {
+    const parsed = JSON.parse(cfg.protectionConfig)
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('non e un oggetto')
+  } catch (e) {
+    fail(64, `--protection-config non valido: ${e}`)
+  }
+}
+const experiment = {
+  position_info: cfg.positionInfo,
+  protection: cfg.protection,
+  protection_config: cfg.protectionConfig ? JSON.parse(cfg.protectionConfig) : null,
+}
 const runDir = path.resolve(cfg.runDir)
 const files = {
   db: path.join(runDir, 'pilot.db'),
@@ -100,6 +122,7 @@ const plan = {
   model: cfg.model, base_url: cfg.baseUrl, key_mode: cfg.keyMode, proxy_shim: useShim, port: cfg.port,
   capital_usdc: 1000, cost_model: cfg.costModel, markets: 'BTC ETH SOL BNB XRP DOGE (prompt originale)', interval_s: 300,
   guard: cfg.guard,
+  experiment,
 }
 if (!cfg.authorized) {
   console.log(JSON.stringify({ status: 'not_started', reason: 'manca --authorized: nessuna chiamata AI eseguita', plan }, null, 2))
@@ -130,7 +153,11 @@ const env = {
   AI_DIAGNOSTICS_FILE: files.trace,
   LOG_LEVEL: 'info',
   PORT: String(cfg.port),
+  ALPHA_POSITION_INFO: cfg.positionInfo,
+  ALPHA_PROTECTION: cfg.protection,
 }
+if (cfg.protectionConfig) env.ALPHA_PROTECTION_CONFIG = cfg.protectionConfig
+else delete env.ALPHA_PROTECTION_CONFIG
 if (useShim) {
   env.NODE_USE_ENV_PROXY = '1'
   env.NODE_OPTIONS = `${env.NODE_OPTIONS ?? ''} --import ${pathToFileURL(path.join(here, 'ccxt-proxy.mjs')).href}`.trim()
@@ -154,7 +181,20 @@ let exited = null
 child.on('exit', (code, signal) => (exited = { code, signal, at: now() }))
 
 const meta = { plan, started_at: now(), account_created_at: null, account_id: null, stopped_at: null, status: 'starting', reasons: [] }
-const saveMeta = () => fs.writeFileSync(files.meta, JSON.stringify(meta, null, 2))
+// run-meta.json is rewritten at every check and read by other windows while the pilot runs: written to a
+// temporary file and renamed, so a reader never sees half a file. On Windows the rename fails while a
+// reader holds the file open: then it is written in place, as before.
+const saveMeta = () => {
+  const text = JSON.stringify(meta, null, 2)
+  const tmp = `${files.meta}.tmp`
+  try {
+    fs.writeFileSync(tmp, text)
+    fs.renameSync(tmp, files.meta)
+  } catch {
+    try { fs.rmSync(tmp, { force: true }) } catch {}
+    fs.writeFileSync(files.meta, text)
+  }
+}
 /** Ultima valutazione di hl-guard.mjs (salvata anche in run-meta.json e check.json). */
 let guardResult = null
 saveMeta()
@@ -233,7 +273,7 @@ async function doFinish(status, reasons) {
   if (meta.account_id && fs.existsSync(files.db)) {
     try {
       const { buildReport } = await import('./report.mjs')
-      report = buildReport({ dbFile: files.db, traceFile: files.trace, accountId: meta.account_id, priceIn: cfg.priceIn, priceOut: cfg.priceOut })
+      report = buildReport({ dbFile: files.db, traceFile: files.trace, accountId: meta.account_id, priceIn: cfg.priceIn, priceOut: cfg.priceOut, experiment })
       fs.writeFileSync(files.report, JSON.stringify(report, null, 2))
     } catch (e) {
       meta.reasons.push(`report non generato: ${e}`)
@@ -262,6 +302,9 @@ const startup = evaluate()
 const startupProblems = [
   ...(exited ? [`app terminata all'avvio: ${JSON.stringify(exited)}`] : []),
   ...(cfg.keyMode === 'env' && !/\[key-inject\] attivo/.test(read(files.log)) ? ['preload key-inject non attivo: la chiave non verrebbe inviata'] : []),
+  // la variante sperimentale e quella chiesta: la riga la scrive l'app all'avvio (describeExperiment)
+  ...(new RegExp(`Experiment config: position_info=${cfg.positionInfo} protection=${cfg.protection}(\\s|$)`, 'm').test(read(files.log))
+    ? [] : [`l'app non conferma la variante sperimentale richiesta (position_info=${cfg.positionInfo}, protection=${cfg.protection})`]),
   ...(/All services initialized successfully/.test(read(files.log)) ? [] : ['avvio non completato']),
   ...startup.blocking,
   ...startup.stop,

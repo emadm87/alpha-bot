@@ -316,6 +316,50 @@ CREATE TABLE IF NOT EXISTS book_fills (
 	status VARCHAR(10) NOT NULL,
 	PRIMARY KEY (id)
 );
+CREATE TABLE IF NOT EXISTS position_protection (
+	account_id INTEGER NOT NULL,
+	symbol VARCHAR(20) NOT NULL,
+	opened_at INTEGER NOT NULL,
+	side VARCHAR(5) NOT NULL,
+	risk_usdc FLOAT NOT NULL,
+	equity_base FLOAT NOT NULL,
+	stage INTEGER NOT NULL,
+	peak_net FLOAT NOT NULL,
+	partial_exits INTEGER NOT NULL,
+	last_net FLOAT,
+	last_floor FLOAT,
+	last_mark FLOAT,
+	last_exit_attempt INTEGER,
+	updated_at INTEGER NOT NULL,
+	closed_at INTEGER,
+	PRIMARY KEY (account_id, symbol, opened_at)
+);
+CREATE TABLE IF NOT EXISTS protection_events (
+	id INTEGER NOT NULL,
+	account_id INTEGER NOT NULL,
+	symbol VARCHAR(20) NOT NULL,
+	side VARCHAR(5) NOT NULL,
+	opened_at INTEGER NOT NULL,
+	triggered_at INTEGER NOT NULL,
+	kind VARCHAR(30) NOT NULL,
+	status VARCHAR(10) NOT NULL,
+	mark_price FLOAT NOT NULL,
+	net_pnl FLOAT NOT NULL,
+	peak_net FLOAT NOT NULL,
+	floor FLOAT NOT NULL,
+	risk_usdc FLOAT NOT NULL,
+	r_multiple FLOAT NOT NULL,
+	stage INTEGER NOT NULL,
+	fraction FLOAT,
+	quantity_requested FLOAT,
+	order_no VARCHAR(40),
+	filled_quantity FLOAT,
+	fill_price FLOAT,
+	reason TEXT NOT NULL,
+	detail TEXT NOT NULL,
+	PRIMARY KEY (id)
+);
+CREATE INDEX IF NOT EXISTS ix_protection_events_account ON protection_events (account_id, triggered_at);
 CREATE TABLE IF NOT EXISTS funding_oracle_prices (
 	funding_time INTEGER NOT NULL,
 	symbol VARCHAR(20) NOT NULL,

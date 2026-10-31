@@ -13,6 +13,9 @@ import {
 import { calcAccountEquity } from './assetCalculator.js'
 import { recordAICycle } from './aiDiagnostics.js'
 import { fetchLatestNews } from './newsFeed.js'
+import { calculatePositionInterest } from './orderExecutorLeverage.js'
+import { buildPositionView, currentPriceFor } from './positionProtection.js'
+import { positionInfoVersion } from './profitProtection.js'
 import { getLogger } from '../utils/logger.js'
 
 const logger = getLogger('services.aiDecision')
@@ -36,9 +39,12 @@ export const SUPPORTED_SYMBOLS: Record<string, string> = {
 export interface PortfolioPosition {
   quantity: number
   avg_cost: number
-  current_value: number
+  /** v1: quantity * avg_cost, the value at ENTRY. v2: quantity * current price. */
+  current_value: number | null
   side: string
   leverage: number
+  /** v2 only (ALPHA_POSITION_INFO=v2): see PositionView in positionProtection.ts. */
+  [extra: string]: unknown
 }
 
 export interface Portfolio {
@@ -77,8 +83,15 @@ export async function getPortfolioData(account: Account): Promise<Portfolio> {
     .all()
 
   const portfolio: Record<string, PortfolioPosition> = {}
+  const v2 = positionInfoVersion() === 'v2'
   for (const pos of rows) {
     if (pos.quantity > 0) {
+      if (v2 && pos.side) {
+        // Task 007A: entry value, current value, P&L, costs and holding time
+        const price = await currentPriceFor(account, pos.symbol)
+        portfolio[pos.symbol] = buildPositionView(account, pos, price, calculatePositionInterest(pos)) as unknown as PortfolioPosition
+        continue
+      }
       portfolio[pos.symbol] = {
         quantity: pos.quantity,
         avg_cost: pos.avgCost,
@@ -97,18 +110,27 @@ export async function getPortfolioData(account: Account): Promise<Portfolio> {
   }
 }
 
-function buildPrompt(
+const POSITIONS_HEADER_V1 = 'each shows quantity, avg_cost, current_value, side: LONG/SHORT, leverage'
+const POSITIONS_HEADER_V2 =
+  'each shows quantity, side: LONG/SHORT, leverage, avg_cost (entry price), entry_value (quantity x avg_cost, the value at entry), ' +
+  'current_price, current_value (quantity x current_price), unrealized_pnl, margin, fees_paid (paid so far on this position), ' +
+  'estimated_exit_fee, financing_net (funding settled, or interest, so far; negative = paid), realized_pnl_partial_closes, ' +
+  'estimated_net_pnl_if_closed_now (unrealized P&L + realized - fees - exit fee + financing; exit spread not included), ' +
+  'return_on_margin_pct, opened_at, holding_minutes'
+
+export function buildPrompt(
   portfolio: Portfolio,
   prices: Record<string, number>,
   newsSection: string,
 ): string {
+  const positionsHeader = positionInfoVersion() === 'v2' ? POSITIONS_HEADER_V2 : POSITIONS_HEADER_V1
   return `You are a cryptocurrency trading AI. Based on the following portfolio and market data, decide on a trading action.
 
 Portfolio Data:
 - Cash Available: $${portfolio.cash.toFixed(2)}
 - Frozen Cash: $${portfolio.frozen_cash.toFixed(2)}
 - Total Assets: $${portfolio.total_assets.toFixed(2)}
-- Current Positions (each shows quantity, avg_cost, current_value, side: LONG/SHORT, leverage):
+- Current Positions (${positionsHeader}):
 ${JSON.stringify(portfolio.positions, null, 2)}
 
 Current Market Prices:
@@ -388,7 +410,9 @@ export function saveAIDecision(
     if ((operation === 'close' || operation === 'hold') && symbol) {
       const pos = portfolio.positions[symbol]
       if (pos && portfolio.total_assets > 0) {
-        prevPortion = pos.current_value / portfolio.total_assets
+        // the share of the value at entry, as before (v2 keeps it in entry_value)
+        const entry = typeof pos.entry_value === 'number' ? pos.entry_value : (pos.current_value ?? 0)
+        prevPortion = entry / portfolio.total_assets
       }
     }
 

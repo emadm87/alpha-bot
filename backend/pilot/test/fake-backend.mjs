@@ -24,6 +24,8 @@ const event = (cycle, ev, data) =>
   fs.appendFileSync(trace, JSON.stringify({ ts: new Date(clock).toISOString(), cycle_id: `c${cycle}`, event: ev, ...data }) + '\n')
 
 log('INFO', 'services.hyperliquid', 'Hyperliquid exchange initialized successfully')
+// come l'app (describeExperiment): la variante sperimentale in uso
+log('INFO', 'services.startup', process.env.FAKE_EXPERIMENT_LINE ?? `Experiment config: position_info=${process.env.ALPHA_POSITION_INFO ?? 'v1'} protection=${process.env.ALPHA_PROTECTION ?? 'off'}`)
 if (scenario === 'startup_fail') {
   log('ERROR', 'services.scheduler', 'Market data readiness check failed: Market data not ready for symbols: BTC')
   log('ERROR', 'services.scheduler', 'Failed to reset auto trading job: Error: Market data not ready for symbols: BTC')

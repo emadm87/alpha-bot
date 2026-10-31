@@ -42,7 +42,7 @@ const sha = (f) => crypto.createHash('sha256').update(fs.readFileSync(f)).digest
 const node = (argv, env = {}) => spawnSync(process.execPath, argv, { cwd: backendDir, env: { ...process.env, ...env }, encoding: 'utf8' })
 
 await step('sintassi degli script', () => {
-  for (const f of ['check-run.mjs', 'report.mjs', 'compare.mjs', 'ccxt-proxy.mjs', 'run-pilot.mjs', 'ai-budget.mjs', 'hl-guard.mjs', 'key-inject.mjs', 'test/fake-backend.mjs', 'test/selftest.mjs']) {
+  for (const f of ['check-run.mjs', 'report.mjs', 'compare.mjs', 'ccxt-proxy.mjs', 'run-pilot.mjs', 'ai-budget.mjs', 'hl-guard.mjs', 'key-inject.mjs', 'replay-protection.mjs', 'test/fake-backend.mjs', 'test/selftest.mjs']) {
     const r = node(['--check', path.join(pilotDir, f)])
     assert.equal(r.status, 0, `${f}: ${r.stderr}`)
   }
@@ -310,7 +310,8 @@ async function startFake(dir, port, extraEnv = {}, extraArgs = []) {
   })
   const exit = new Promise((r) => p.on('exit', (code) => r(code)))
   const meta = path.join(dir, 'run-meta.json')
-  for (let i = 0; i < 100 && !(fs.existsSync(meta) && JSON.parse(fs.readFileSync(meta, 'utf8')).account_id); i++) await new Promise((r) => setTimeout(r, 100))
+  const created = () => { try { return Boolean(JSON.parse(fs.readFileSync(meta, 'utf8')).account_id) } catch { return false } }
+  for (let i = 0; i < 100 && !created(); i++) await new Promise((r) => setTimeout(r, 100))
   return { p, exit, meta }
 }
 
@@ -592,6 +593,64 @@ if (!isWindows) {
     for (const f of fs.readdirSync(dir)) assert.ok(!fs.readFileSync(path.join(dir, f)).includes(fakeKey), `chiave in ${f}`)
   })
 }
+
+// --- 007A: variante sperimentale (informazioni sulla posizione, protezione) e replay ------------------------
+await step('launcher: variante sperimentale nel piano (default originale), valori non validi rifiutati', () => {
+  const plan = (extra) => JSON.parse(runPilot(path.join(tmp, 'no-auth'), 'complete', extra).stdout).plan
+  assert.deepEqual(plan([]).experiment, { position_info: 'v1', protection: 'off', protection_config: null })
+  assert.deepEqual(plan(['--position-info', 'v2', '--protection', 'on', '--protection-config', '{"giveBackFraction":0.4}']).experiment,
+    { position_info: 'v2', protection: 'on', protection_config: { giveBackFraction: 0.4 } })
+  for (const bad of [['--position-info', 'v3'], ['--protection', 'maybe'], ['--protection-config', '{oops'], ['--protection-config', '[1]']]) {
+    assert.equal(runPilot(path.join(tmp, 'no-auth'), 'complete', bad).status, 64, bad.join(' '))
+  }
+  assert.equal(fs.existsSync(path.join(tmp, 'no-auth')), false)
+})
+
+await step('launcher: la variante sperimentale arriva all app e viene confermata dal suo log; una conferma diversa ferma prima dell AI', async () => {
+  const dir = path.join(tmp, 'experiment')
+  const r = runPilot(dir, 'complete', [...fakeArgs(5800), '--cost-model', 'hyperliquid', '--position-info', 'v2', '--protection', 'on'])
+  assert.equal(r.status, 0, r.stdout + r.stderr)
+  const meta = JSON.parse(fs.readFileSync(path.join(dir, 'run-meta.json'), 'utf8'))
+  assert.deepEqual(meta.plan.experiment, { position_info: 'v2', protection: 'on', protection_config: null })
+  assert.match(fs.readFileSync(path.join(dir, 'backend.log'), 'utf8'), /Experiment config: position_info=v2 protection=on/)
+  // l'app dichiara un'altra variante: nessun conto, nessuna chiamata
+  const dir2 = path.join(tmp, 'experiment-mismatch')
+  const bad = node([path.join(pilotDir, 'run-pilot.mjs'), '--run-dir', dir2, ...fakeArgs(5801), '--protection', 'on'],
+    { FAKE_SCENARIO: 'complete', FAKE_EXPERIMENT_LINE: 'Experiment config: position_info=v1 protection=off' })
+  assert.equal(bad.status, 2)
+  const m2 = JSON.parse(fs.readFileSync(path.join(dir2, 'run-meta.json'), 'utf8'))
+  assert.equal(m2.status, 'aborted_before_ai')
+  assert.ok(m2.reasons.some((x) => x.includes('non conferma la variante sperimentale')), m2.reasons.join('; '))
+  assert.equal(fs.existsSync(path.join(dir2, 'fake-post-received')), false)
+})
+
+await step('report: sezione protection e cronologia unica delle decisioni (vuote senza protezione), variante registrata', () => {
+  const rep = buildReport({ dbFile, traceFile: dbFile.replace(/\.db$/, '.jsonl'), at: '2026-10-25T04:00:00.000Z', experiment: { position_info: 'v1', protection: 'off', protection_config: null } })
+  assert.deepEqual(rep.experiment, { position_info: 'v1', protection: 'off', protection_config: null })
+  assert.deepEqual(rep.protection.events, [])
+  assert.deepEqual(rep.protection.counts, {})
+  assert.ok(rep.decision_trace.length > 0 && rep.decision_trace.every((d) => d.source === 'ai'))
+  assert.equal(rep.reconciliation.ok, true)
+})
+
+await step('replay della protezione: sola lettura, risultato ipotetico con limiti dichiarati, nessuna scrittura', () => {
+  const before = sha(dbFile)
+  const run = (extra = []) => node(['--import', 'tsx', path.join(pilotDir, 'replay-protection.mjs'), dbFile, dbFile.replace(/\.db$/, '.jsonl'), ...extra], { LOG_LEVEL: 'error' })
+  const r = run()
+  assert.equal(r.status, 0, r.stderr.slice(-500))
+  const out = JSON.parse(r.stdout)
+  assert.equal(typeof out.verifiable, 'boolean')
+  assert.ok(out.limits.some((l) => /not recorded/.test(l)) && out.limits.some((l) => /not an account result/.test(l)))
+  assert.ok(Array.isArray(out.positions))
+  for (const p of out.positions) assert.match(p.hypothetical.note, /HYPOTHETICAL|never fired/)
+  assert.equal(out.config.enabled, true)
+  // parametri diversi: convalidati come nell'app; testo leggibile
+  const t = run(['--text', '--config', '{"giveBackFraction":0.3}'])
+  assert.equal(t.status, 0, t.stderr.slice(-300))
+  assert.match(t.stdout, /Replay protezione \(IPOTETICO\)/)
+  assert.notEqual(run(['--config', '{"typo":1}']).status, 0, 'parametro sconosciuto rifiutato')
+  assert.equal(sha(dbFile), before, 'il replay ha modificato il database')
+})
 
 await step('launcher: cartella non vuota rifiutata', () => {
   const dir = path.join(tmp, 'complete') // gia usata

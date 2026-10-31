@@ -50,6 +50,10 @@ export async function initializeServices(): Promise<void> {
     )
     logger.info('Price cache cleanup task started (2-minute interval)')
 
+    // Experiment switches (Task 007A): what this run does differently from the original
+    const { describeExperiment } = await import('./positionProtection.js')
+    logger.info(describeExperiment())
+
     // Margin monitoring for leveraged positions (every 5 seconds)
     startMarginMonitor(5)
     logger.info('Margin monitor started (5-second interval)')

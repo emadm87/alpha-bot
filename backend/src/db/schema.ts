@@ -239,6 +239,66 @@ export const liquidationEvents = sqliteTable('liquidation_events', {
 })
 
 /**
+ * Profit protection state of an open position (Task 007A): one row per
+ * position lifecycle, keyed by the time its first fill happened.
+ */
+export const positionProtection = sqliteTable('position_protection', {
+  accountId: integer('account_id').notNull(),
+  symbol: text('symbol').notNull(),
+  /** ms since epoch of the first fill of this position. */
+  openedAt: integer('opened_at').notNull(),
+  side: text('side').notNull(),
+  /** R: the loss the position is allowed, USDC. */
+  riskUsdc: real('risk_usdc').notNull(),
+  /** Account value without unrealized P&L when the position was first seen. */
+  equityBase: real('equity_base').notNull(),
+  stage: integer('stage').notNull(),
+  peakNet: real('peak_net').notNull(),
+  partialExits: integer('partial_exits').notNull(),
+  lastNet: real('last_net'),
+  lastFloor: real('last_floor'),
+  lastMark: real('last_mark'),
+  lastExitAttempt: integer('last_exit_attempt'),
+  updatedAt: integer('updated_at').notNull(),
+  closedAt: integer('closed_at'),
+})
+
+/**
+ * Every decision of the profit protection module that changed something
+ * (Task 007A): stage changes ('breakeven_armed', 'trailing_armed') and exits
+ * ('exit_risk', 'exit_profit_protection'), executed or failed, with the
+ * numbers they used. HOLD and AI closes stay in ai_decision_logs.
+ */
+export const protectionEvents = sqliteTable('protection_events', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  accountId: integer('account_id').notNull(),
+  symbol: text('symbol').notNull(),
+  side: text('side').notNull(),
+  openedAt: integer('opened_at').notNull(),
+  /** ms since epoch */
+  triggeredAt: integer('triggered_at').notNull(),
+  /** 'breakeven_armed' | 'trailing_armed' | 'exit_risk' | 'exit_profit_protection' */
+  kind: text('kind').notNull(),
+  /** 'info' (stage change) | 'executed' | 'partial' | 'failed' */
+  status: text('status').notNull(),
+  markPrice: real('mark_price').notNull(),
+  netPnl: real('net_pnl').notNull(),
+  peakNet: real('peak_net').notNull(),
+  floor: real('floor').notNull(),
+  riskUsdc: real('risk_usdc').notNull(),
+  rMultiple: real('r_multiple').notNull(),
+  stage: integer('stage').notNull(),
+  fraction: real('fraction'),
+  quantityRequested: real('quantity_requested'),
+  orderNo: text('order_no'),
+  filledQuantity: real('filled_quantity'),
+  fillPrice: real('fill_price'),
+  reason: text('reason').notNull(),
+  /** JSON: the input of the rules and the configuration used. */
+  detail: text('detail').notNull(),
+})
+
+/**
  * Fills of the 'hyperliquid' cost model against an `l2Book` snapshot
  * (Task 006I-5): one row per order, with the snapshot it used.
  */
