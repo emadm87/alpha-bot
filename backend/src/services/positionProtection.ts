@@ -54,6 +54,7 @@ import {
   type Side,
 } from './exitRules.js'
 import { marksFromAssetContexts } from './hyperliquidMarginData.js'
+import { promptVersion } from './promptV3.js'
 import { getLastPrice } from './marketData.js'
 import { TICKER_MAX_AGE_MS } from './quantData.js'
 
@@ -556,7 +557,8 @@ export function buildPositionView(
 export function describeExperiment(env: Record<string, string | undefined> = process.env): string {
   const cfg = loadExitConfig(env)
   const info = positionInfoVersion(env)
-  return `Experiment config: position_info=${info} protection=${cfg.mode}${cfg.mode !== 'off' ? ` config=${JSON.stringify(cfg)}` : ''}`
+  const prompt = promptVersion(env)
+  return `Experiment config: position_info=${info} protection=${cfg.mode} prompt=${prompt}${cfg.mode !== 'off' ? ` config=${JSON.stringify(cfg)}` : ''}`
 }
 
 /** Events of a set of kinds since a time (report, tests). */

@@ -16,6 +16,9 @@ import { fetchLatestNews } from './newsFeed.js'
 import { calculatePositionInterest } from './orderExecutorLeverage.js'
 import { activeCooldowns, buildPositionView, currentPriceFor } from './positionProtection.js'
 import { positionInfoVersion } from './exitRules.js'
+import { buildMessagesV3, estimateTokens, promptVersion, V3_GENERATION } from './promptV3.js'
+import { markDecisionV3Outcome, parseV3, recordDecisionV3, validateDecisionV3 } from './aiDecisionV3.js'
+import { buildV3Context, type V3Context } from './v3Context.js'
 import { getLogger } from '../utils/logger.js'
 
 const logger = getLogger('services.aiDecision')
@@ -256,16 +259,27 @@ export async function callAIForDecision(
   }
 
   try {
+    // Task 007F: ALPHA_PROMPT=v3 builds the v3 context and messages; otherwise
+    // (the default) the original prompt below, unchanged.
+    const v3 = promptVersion() === 'v3'
+    let v3ctx: V3Context | null = null
+    let payload: { model: string | null; messages: { role: string; content: string }[]; temperature: number; max_tokens: number }
+    if (v3) {
+      const startedAt = Date.now()
+      v3ctx = await buildV3Context(account, portfolio, prices, startedAt)
+      payload = { model: account.model, messages: buildMessagesV3(v3ctx), ...V3_GENERATION }
+    } else {
     const newsSummary = await fetchLatestNews()
     const newsSection = newsSummary || 'No recent CoinJournal news available.'
     const prompt = buildPrompt(portfolio, prices, newsSection)
 
     // Use OpenAI-compatible chat completions format
-    const payload = {
+    payload = {
       model: account.model,
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.7,
       max_tokens: 1000,
+    }
     }
 
     const baseUrl = (account.baseUrl ?? '').replace(/\/+$/, '')
@@ -364,7 +378,26 @@ export async function callAIForDecision(
       return null
     }
 
-    const decision = parseDecisionText(unwrapCodeFence(textContent))
+    let decision: AIDecision
+    if (v3ctx) {
+      const promptText = payload.messages.map((m) => m.content).join('\n')
+      const parsed = parseV3(textContent)
+      if ('error' in parsed) {
+        const id = recordDecisionV3(account, cycleId, v3ctx.now, { error: parsed.error, raw: textContent }, v3ctx)
+        markDecisionV3Outcome(id, 'no_decision', parsed.error)
+        logger.error(`v3 answer refused for ${account.name}: ${parsed.error}`)
+        trace('api_error', { error: `v3: ${parsed.error}` })
+        return null
+      }
+      const validation = validateDecisionV3(parsed.value, v3ctx, promptText)
+      const id = recordDecisionV3(account, cycleId, v3ctx.now, { value: parsed.value, validation }, v3ctx, {
+        prompt_tokens_estimate: estimateTokens(promptText), news_items: v3ctx.news.items.length,
+      })
+      if (validation.issues.length) logger.warning(`v3 decision of ${account.name}: ${validation.issues.join('; ')}`)
+      decision = { ...(parsed.value as AIDecision), _v3: { id, rejected: validation.rejected, issues: validation.issues, numbers: validation.numbers } }
+    } else {
+    decision = parseDecisionText(unwrapCodeFence(textContent))
+    }
 
     if (typeof decision !== 'object' || decision === null || Array.isArray(decision)) {
       logger.error(`AI response is not an object: ${typeof decision}`)

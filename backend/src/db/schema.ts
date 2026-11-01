@@ -320,6 +320,60 @@ export const exitEvents = sqliteTable('exit_events', {
 })
 
 /**
+ * Local market history for the v3 decision context (Task 007F): closed 1 h
+ * bars of the six markets, validated, kept for 45 days, filled progressively
+ * (one small request per coin per closed hour at most).
+ */
+export const marketBars = sqliteTable('market_bars', {
+  symbol: text('symbol').notNull(),
+  interval: text('interval').notNull(),
+  /** ms since epoch, start of the bar */
+  openTime: integer('open_time').notNull(),
+  open: real('open').notNull(),
+  high: real('high').notNull(),
+  low: real('low').notNull(),
+  close: real('close').notNull(),
+  volume: real('volume').notNull(),
+  receivedAt: integer('received_at').notNull(),
+})
+
+/**
+ * Every v3 decision of the AI (Task 007F): the validated JSON, the problems
+ * found (schema, levels on the wrong side, numbers not present in the data
+ * given), a compact snapshot of the context of the coin, and what happened.
+ * The memory of the next prompts is read from here (the last few only).
+ */
+export const aiDecisionsV3 = sqliteTable('ai_decisions_v3', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  accountId: integer('account_id').notNull(),
+  at: integer('at').notNull(),
+  cycleId: text('cycle_id'),
+  operation: text('operation'),
+  symbol: text('symbol'),
+  direction: text('direction'),
+  /** 1 when the decision passed validation */
+  valid: integer('valid').notNull(),
+  /** JSON array of the problems found */
+  issues: text('issues').notNull(),
+  /** JSON: the decision as returned (parsed) */
+  decision: text('decision').notNull(),
+  /** JSON: the context of the decided coin at that moment (trend, structure, ATR, price) */
+  context: text('context').notNull(),
+  executed: integer('executed'),
+  outcome: text('outcome'),
+})
+
+/** Highest and lowest price seen while a position is open (v3 position review: max profit and max loss). */
+export const positionWatch = sqliteTable('position_watch', {
+  accountId: integer('account_id').notNull(),
+  symbol: text('symbol').notNull(),
+  openedAt: integer('opened_at').notNull(),
+  maxPrice: real('max_price').notNull(),
+  minPrice: real('min_price').notNull(),
+  updatedAt: integer('updated_at').notNull(),
+})
+
+/**
  * Fills of the 'hyperliquid' cost model against an `l2Book` snapshot
  * (Task 006I-5): one row per order, with the snapshot it used.
  */

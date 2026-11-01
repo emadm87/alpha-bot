@@ -376,6 +376,44 @@ CREATE TABLE IF NOT EXISTS exit_events (
 	PRIMARY KEY (id)
 );
 CREATE INDEX IF NOT EXISTS ix_exit_events_account ON exit_events (account_id, symbol, side, at);
+CREATE TABLE IF NOT EXISTS market_bars (
+	symbol VARCHAR(20) NOT NULL,
+	interval VARCHAR(4) NOT NULL,
+	open_time INTEGER NOT NULL,
+	open FLOAT NOT NULL,
+	high FLOAT NOT NULL,
+	low FLOAT NOT NULL,
+	close FLOAT NOT NULL,
+	volume FLOAT NOT NULL,
+	received_at INTEGER NOT NULL,
+	PRIMARY KEY (symbol, interval, open_time)
+);
+CREATE TABLE IF NOT EXISTS ai_decisions_v3 (
+	id INTEGER NOT NULL,
+	account_id INTEGER NOT NULL,
+	at INTEGER NOT NULL,
+	cycle_id VARCHAR(40),
+	operation VARCHAR(10),
+	symbol VARCHAR(20),
+	direction VARCHAR(5),
+	valid INTEGER NOT NULL,
+	issues TEXT NOT NULL,
+	decision TEXT NOT NULL,
+	context TEXT NOT NULL,
+	executed INTEGER,
+	outcome TEXT,
+	PRIMARY KEY (id)
+);
+CREATE INDEX IF NOT EXISTS ix_ai_decisions_v3_account ON ai_decisions_v3 (account_id, at);
+CREATE TABLE IF NOT EXISTS position_watch (
+	account_id INTEGER NOT NULL,
+	symbol VARCHAR(20) NOT NULL,
+	opened_at INTEGER NOT NULL,
+	max_price FLOAT NOT NULL,
+	min_price FLOAT NOT NULL,
+	updated_at INTEGER NOT NULL,
+	PRIMARY KEY (account_id, symbol, opened_at)
+);
 CREATE TABLE IF NOT EXISTS funding_oracle_prices (
 	funding_time INTEGER NOT NULL,
 	symbol VARCHAR(20) NOT NULL,

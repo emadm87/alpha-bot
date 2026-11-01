@@ -497,8 +497,8 @@ test('18. original cost model: untouched even with C1 on', async () => {
 test('19. invalid settings stop the app at startup; the 007A "on" is refused', () => {
   assert.throws(() => P.describeExperiment({ ALPHA_POSITION_INFO: 'v3' }), /v1 or v2/)
   assert.throws(() => P.describeExperiment({ ALPHA_PROTECTION: 'on' }), /replaced by C1\/C2\/C3/)
-  assert.match(P.describeExperiment({ ALPHA_PROTECTION: 'c2', ALPHA_POSITION_INFO: 'v2' }), /^Experiment config: position_info=v2 protection=C2 config=\{/)
-  assert.equal(P.describeExperiment({}), 'Experiment config: position_info=v1 protection=off')
+  assert.match(P.describeExperiment({ ALPHA_PROTECTION: 'c2', ALPHA_POSITION_INFO: 'v2' }), /^Experiment config: position_info=v2 protection=C2 prompt=v1 config=\{/)
+  assert.equal(P.describeExperiment({}), 'Experiment config: position_info=v1 protection=off prompt=v1')
 })
 
 // --- what the AI is shown ------------------------------------------------------------------

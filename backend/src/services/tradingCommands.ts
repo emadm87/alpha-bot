@@ -17,6 +17,7 @@ import {
   SUPPORTED_SYMBOLS,
 } from './aiDecision.js'
 import { newCycleId, recordAICycle } from './aiDiagnostics.js'
+import { markDecisionV3Outcome } from './aiDecisionV3.js'
 import { getLogger } from '../utils/logger.js'
 
 const logger = getLogger('services.tradingCommands')
@@ -170,13 +171,16 @@ export async function placeAIDrivenCryptoOrder(): Promise<void> {
         }
 
         const cycleId = newCycleId()
-        const outcome = (status: string, detail: string, orderId?: number | null) =>
+        let v3Row: number | null = null // Task 007F: the ai_decisions_v3 row of this cycle (ALPHA_PROMPT=v3 only)
+        const outcome = (status: string, detail: string, orderId?: number | null) => {
           recordAICycle(cycleId, 'outcome', {
             account_id: account.id,
             status,
             detail,
             order_id: orderId ?? null,
           })
+          if (v3Row !== null) markDecisionV3Outcome(v3Row, status, detail)
+        }
 
         const decision = await callAIForDecision(
           account,
@@ -190,6 +194,19 @@ export async function placeAIDrivenCryptoOrder(): Promise<void> {
           )
           outcome('no_decision', 'No usable AI decision; nothing executed')
           continue
+        }
+
+        // Task 007F (ALPHA_PROMPT=v3 only): an "open" without a usable plan is not executed
+        const v3 = decision._v3 as { id: number; rejected: boolean; issues: string[] } | undefined
+        if (v3) {
+          v3Row = v3.id
+          if (v3.rejected) {
+            const msg = `v3 validation: ${v3.issues.join('; ')}`
+            logger.warning(`AI decision of ${account.name} not executed: ${msg}`)
+            outcome('rejected', msg)
+            saveAIDecision(account, decision, portfolio, false)
+            continue
+          }
         }
 
         const operation = decision.operation

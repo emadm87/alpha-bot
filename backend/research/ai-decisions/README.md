@@ -111,3 +111,27 @@ Prices are the **assumption** used by the pilot reports (0.30 USD per 1M input t
 - Reason tags are keyword-based: they describe wording, not intent.
 - The market context uses trade candles (not the mark price), and covers 9 Sep – 31 Oct 2026.
 - The cost figures depend on the assumed token prices.
+
+## Task 007F: v3 implemented, off by default (`ALPHA_PROMPT=v3`)
+
+Architecture A: one call per cycle, same cadence, same temperature (0.7) and output limit (1000). With `ALPHA_PROMPT` unset or `v1` the
+original prompt is sent byte for byte (test 9 of `src/services/aiV3.test.ts`: SHA-256 `9062562e…`, and the real order path sends one user
+message equal to `buildPrompt`). The startup line says `prompt=v1|v3`; the launcher takes `--prompt v1|v3` and stops before any AI call if
+the app does not confirm it.
+
+| File | Role |
+|---|---|
+| `src/services/marketHistory.ts` | closed 1 h bars of the six coins in the run's database (`market_bars`): 45-day backfill once, then only the missing hours; validated bars; restart-safe; failures reported, not hidden |
+| `src/services/marketContext.ts` | per coin brief: trend 1h/4h, structure and levels, momentum, volume, volatility and its percentile, costs, risk budget; data quality and what is missing |
+| `src/services/newsFeed.ts` (`fetchNewsItems`, `selectNews`) | news dated, ≤ 24 h, not future, about the six coins or the market, no duplicates, ≤ 8, marked when already shown; `fetchLatestNews` (v1) unchanged |
+| `src/services/v3Context.ts` | account, positions (net P&L, % of the account, holding time, highest/lowest since entry, exit plan and R, risk on the account, entry reason, market changes since entry), last 6 decisions with what happened since, cooldowns |
+| `src/services/promptV3.ts` | system + user messages, `promptVersion`, token and cost estimates |
+| `src/services/aiDecisionV3.ts` | parse (JSON object only), validate, record (`ai_decisions_v3`) and outcome |
+
+Validation policy: not JSON → no decision; an `open` without thesis, horizon, and invalidation/target on the right side of the price → not
+executed, recorded as rejected; numbers in the text that are not in the data → flagged and counted, not blocking. Size and leverage are
+passed to the engine unchanged; the engine's checks, the exit module and the cooldown apply as before.
+
+Example and size, offline from the committed data: `npx tsx research/ai-decisions/prompt-v3-example.mts --protection C3 --out <file>`
+(rendered: `examples/prompt-v3-2026-10-28T1837Z-C3.txt`). About 4,500 estimated tokens for a flat account; about 6,900–7,700 with one
+position, 6 decisions in memory and 8 news items (characters / 3.2: an estimate, not a measurement of Gemini's tokenizer).

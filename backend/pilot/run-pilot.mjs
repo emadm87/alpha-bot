@@ -24,6 +24,8 @@
 //   --protection off | C1 | C2 | C3    gestione delle uscite, solo modello hyperliquid (007C): C1 stop 2 ATR + chandelier
 //                                      3 ATR; C2 stop 2 ATR, 25% a +1,5R, pareggio + chandelier; C3 stop 2 ATR, TP +2R
 //   --protection-config '{"cooldownMs":7200000}'  parametri diversi dai default (JSON, convalidato dall'app)
+//   --prompt v1 | v3                   prompt dell'AI (007F; v1 = originale; v3 = contesto di mercato, memoria,
+//                                      notizie filtrate, risposta convalidata). Stessa cadenza: una chiamata per ciclo
 //
 // Chiave AI (--key-mode env): il conto contiene solo il segnaposto; la chiave viene aggiunta alle sole
 // richieste verso l'host AI dal preload key-inject.mjs nel processo dell'app (mai nel database o nei log).
@@ -75,6 +77,7 @@ const cfg = {
   positionInfo: flag('--position-info', process.env.ALPHA_POSITION_INFO ?? 'v1').toLowerCase(),
   protection: ((v) => (v.toLowerCase() === 'off' ? 'off' : v.toUpperCase()))(flag('--protection', process.env.ALPHA_PROTECTION ?? 'off')),
   protectionConfig: flag('--protection-config', process.env.ALPHA_PROTECTION_CONFIG ?? ''),
+  prompt: flag('--prompt', process.env.ALPHA_PROMPT ?? 'v1').toLowerCase(),
 }
 const PLACEHOLDER_KEY = 'network-secret-placeholder'
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -92,6 +95,7 @@ if (!['original', 'hyperliquid'].includes(cfg.costModel)) fail(64, `--cost-model
 if (!['on', 'off'].includes(cfg.guard)) fail(64, `--guard non valido: ${cfg.guard}`)
 if (!['v1', 'v2'].includes(cfg.positionInfo)) fail(64, `--position-info non valido: ${cfg.positionInfo}`)
 if (!['off', 'C1', 'C2', 'C3'].includes(cfg.protection)) fail(64, `--protection non valido: ${cfg.protection} (off, C1, C2 o C3)`)
+if (!['v1', 'v3'].includes(cfg.prompt)) fail(64, `--prompt non valido: ${cfg.prompt} (v1 o v3)`)
 if (cfg.protectionConfig) {
   try {
     const parsed = JSON.parse(cfg.protectionConfig)
@@ -104,6 +108,7 @@ const experiment = {
   position_info: cfg.positionInfo,
   protection: cfg.protection,
   protection_config: cfg.protectionConfig ? JSON.parse(cfg.protectionConfig) : null,
+  prompt: cfg.prompt,
 }
 const runDir = path.resolve(cfg.runDir)
 const files = {
@@ -156,6 +161,7 @@ const env = {
   PORT: String(cfg.port),
   ALPHA_POSITION_INFO: cfg.positionInfo,
   ALPHA_PROTECTION: cfg.protection,
+  ALPHA_PROMPT: cfg.prompt,
 }
 if (cfg.protectionConfig) env.ALPHA_PROTECTION_CONFIG = cfg.protectionConfig
 else delete env.ALPHA_PROTECTION_CONFIG
@@ -304,8 +310,8 @@ const startupProblems = [
   ...(exited ? [`app terminata all'avvio: ${JSON.stringify(exited)}`] : []),
   ...(cfg.keyMode === 'env' && !/\[key-inject\] attivo/.test(read(files.log)) ? ['preload key-inject non attivo: la chiave non verrebbe inviata'] : []),
   // la variante sperimentale e quella chiesta: la riga la scrive l'app all'avvio (describeExperiment)
-  ...(new RegExp(`Experiment config: position_info=${cfg.positionInfo} protection=${cfg.protection}(\\s|$)`, 'm').test(read(files.log))
-    ? [] : [`l'app non conferma la variante sperimentale richiesta (position_info=${cfg.positionInfo}, protection=${cfg.protection})`]),
+  ...(new RegExp(`Experiment config: position_info=${cfg.positionInfo} protection=${cfg.protection} prompt=${cfg.prompt}(\\s|$)`, 'm').test(read(files.log))
+    ? [] : [`l'app non conferma la variante sperimentale richiesta (position_info=${cfg.positionInfo}, protection=${cfg.protection}, prompt=${cfg.prompt})`]),
   ...(/All services initialized successfully/.test(read(files.log)) ? [] : ['avvio non completato']),
   ...startup.blocking,
   ...startup.stop,
