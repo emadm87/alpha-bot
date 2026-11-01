@@ -1,0 +1,61 @@
+{
+  "built_at": "2026-11-01T01:46:09.463Z",
+  "data_shifted_by_hours": 3,
+  "scenarios": [
+    {
+      "name": "minimum",
+      "protection": "off",
+      "positions": 0,
+      "memory": 0,
+      "news": 0,
+      "system_chars": 3114,
+      "user_chars": 10672,
+      "estimate_tokens": 5976,
+      "gemini_vocab_tokens": {
+        "system": 823,
+        "user": 5262,
+        "input_total": 6085,
+        "answer": 169,
+        "note": "exact counts with the Gemma 3 vocabulary (count_tokens.py); the API adds about 1 start token per request (calibrated on 36 recorded calls)"
+      },
+      "estimate_error_pct": -1.8
+    },
+    {
+      "name": "medium",
+      "protection": "C3",
+      "positions": 1,
+      "memory": 4,
+      "news": 4,
+      "system_chars": 3299,
+      "user_chars": 15354,
+      "estimate_tokens": 7955,
+      "gemini_vocab_tokens": {
+        "system": 885,
+        "user": 6926,
+        "input_total": 7811,
+        "answer": 275,
+        "note": "exact counts with the Gemma 3 vocabulary (count_tokens.py); the API adds about 1 start token per request (calibrated on 36 recorded calls)"
+      },
+      "estimate_error_pct": 1.8
+    },
+    {
+      "name": "maximum",
+      "protection": "C2",
+      "positions": 6,
+      "memory": 6,
+      "news": 8,
+      "system_chars": 3371,
+      "user_chars": 29228,
+      "estimate_tokens": 13812,
+      "gemini_vocab_tokens": {
+        "system": 908,
+        "user": 12137,
+        "input_total": 13045,
+        "answer": 482,
+        "note": "exact counts with the Gemma 3 vocabulary (count_tokens.py); the API adds about 1 start token per request (calibrated on 36 recorded calls)"
+      },
+      "estimate_error_pct": 5.9
+    }
+  ],
+  "token_counter": "research/ai-decisions/count_tokens.py with a Gemma 3 tokenizer.json (not in the repository)"
+}

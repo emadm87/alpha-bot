@@ -101,12 +101,17 @@ export function buildMessagesV3(ctx: V3Context): { role: 'system' | 'user'; cont
 }
 
 /**
- * Token estimate without any API call: characters / 3.2 for this mix of
- * English and compact JSON (the original prompt measured about 3.3-3.4
- * characters per token with Gemini). An estimate, reported as such.
+ * Token estimate without any API call. Gemini's tokenizer spends one token
+ * per digit, so the number-heavy v3 data costs about 2 characters per token
+ * where prose costs 3.4: digits + other characters / 2.9. Checked against
+ * exact counts of the Gemini vocabulary on real v3 prompts (minimum, medium,
+ * maximum: research/ai-decisions/examples/sizes, within about 5 %; test 10).
+ * An estimate, reported as such; the API's usage field is the measurement.
  */
 export function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 3.2)
+  let digits = 0
+  for (let i = 0; i < text.length; i++) { const c = text.charCodeAt(i); if (c >= 48 && c <= 57) digits++ }
+  return Math.ceil(digits + (text.length - digits) / 2.9)
 }
 
 export interface CostEstimate {

@@ -60,19 +60,17 @@ news feed unavailable this cycle (offline example: the news feed is not read): t
 
 Decide now: one JSON object as specified.
 
-## SIZE (estimates: characters / 3.2; no API call)
+## SIZE (estimate: digits + other characters / 2.9, see estimateTokens; no API call)
 {
   "system_chars": 3299,
   "user_chars": 11217,
-  "tokens_this_example": 4537,
-  "tokens_full_prompt_estimate": 7671,
-  "note_full": "plus one position with exit plan, 6 decisions in memory and 8 news items at their maximum length",
+  "tokens_this_example": 6205,
   "output_tokens_assumed": 250,
-  "cost_per_day_5min": {
+  "cost_per_day_5min_at_assumed_prices": {
     "calls_per_day": 288,
-    "input_tokens_per_call": 7671,
+    "input_tokens_per_call": 6205,
     "output_tokens_per_call": 250,
-    "usd_per_day": 0.843,
+    "usd_per_day": 0.716,
     "assumed_usd_per_1m": {
       "input": 0.3,
       "output": 2.5
@@ -80,12 +78,13 @@ Decide now: one JSON object as specified.
   },
   "cost_per_day_original_measured": {
     "calls_per_day": 288,
-    "input_tokens_per_call": 1800,
+    "input_tokens_per_call": 1790,
     "output_tokens_per_call": 97,
-    "usd_per_day": 0.225,
+    "usd_per_day": 0.224,
     "assumed_usd_per_1m": {
       "input": 0.3,
       "output": 2.5
     }
-  }
+  },
+  "fuller_prompts": "see research/ai-decisions/examples/sizes/sizes.json"
 }

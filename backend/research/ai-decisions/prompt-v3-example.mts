@@ -9,8 +9,8 @@
 // - funding = last committed hourly funding rate at or before --at (live: the asset context);
 // - impact prices and 24 h notional volume are not in the committed data: null, listed as missing;
 // - account flat (1000 USDC, no position), no previous decision, news unavailable offline.
-// So the example shows exactly what an empty account would send; the size of a full prompt (one position, 6 decisions
-// in memory, 8 news items) is estimated by adding the measured size of those blocks at their maximum length.
+// So the example shows exactly what an empty account would send. Sizes of fuller prompts (positions, memory, news):
+// research/ai-decisions/v3-prompt-sizes.mts and examples/sizes/.
 import fs from 'node:fs'
 import path from 'node:path'
 import { coinBrief, briefSnapshot } from '../../src/services/marketContext.ts'
@@ -53,24 +53,16 @@ const ctx: V3Context = {
 }
 const [sys, usr] = buildMessagesV3(ctx)
 const tokens = { system: estimateTokens(sys!.content), user: estimateTokens(usr!.content) }
-// maximum-size blocks of a full prompt, measured on their JSON lines (values at their length limits)
-const memoryLine = JSON.stringify({ minutes_ago: 1435, operation: 'hold', symbol: 'DOGE', direction: 'short', outcome: 'execution_failed', valid: false,
-  reason: 'x'.repeat(220), thesis: 'y'.repeat(160), invalidation_price: 0.212345, target_price: 0.198765, price_then: 0.205432, price_now: 0.206789, change_since_pct: 0.66 })
-const newsLine = JSON.stringify({ published: '2026-10-28T18:00Z', age_hours: 23.9, source: 'coinjournal.net', coins: ['BTC', 'ETH'], scope: 'coin', new_since_last_cycle: false,
-  title: 't'.repeat(160), summary: 's'.repeat(280) })
-const positionLineChars = 1300 // upper bound of a v3 position line with its exit plan, enforced by tests 7 and 10 of src/services/aiV3.test.ts
-const extra = 6 * (memoryLine.length + 1) + 8 * (newsLine.length + 1) + positionLineChars
-const full = tokens.system + tokens.user + estimateTokens('x'.repeat(extra))
 const out = [
   `# v3 prompt, offline example at ${new Date(at).toISOString()} (exit module ${exitModule.mode})`,
   '# Data: committed Hyperliquid candles and funding (backend/research/exit-rules/data, SHA-256 verified). Price = last 15 m close;',
   '# impact prices and 24 h volume not in the committed data (null, listed as missing); flat account, no memory, no news.',
   '', '## SYSTEM', sys!.content, '', '## USER', usr!.content, '',
-  '## SIZE (estimates: characters / 3.2; no API call)',
+  '## SIZE (estimate: digits + other characters / 2.9, see estimateTokens; no API call)',
   JSON.stringify({
     system_chars: sys!.content.length, user_chars: usr!.content.length, tokens_this_example: tokens.system + tokens.user,
-    tokens_full_prompt_estimate: full, note_full: 'plus one position with exit plan, 6 decisions in memory and 8 news items at their maximum length',
-    output_tokens_assumed: 250, cost_per_day_5min: estimateDailyCost(full, 250), cost_per_day_original_measured: estimateDailyCost(1800, 97),
+    output_tokens_assumed: 250, cost_per_day_5min_at_assumed_prices: estimateDailyCost(tokens.system + tokens.user, 250),
+    cost_per_day_original_measured: estimateDailyCost(1790, 97), fuller_prompts: 'see research/ai-decisions/examples/sizes/sizes.json',
   }, null, 2),
 ].join('\n') + '\n'
 const file = args.includes('--out') ? flag('--out', '') : null

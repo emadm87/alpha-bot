@@ -271,6 +271,23 @@ test('3. history: one backfill, nothing asked when up to date (also after a rest
 })
 const HISTORY_RETRY = H.HISTORY.retryMs
 
+test('3b. history: an hour the exchange does not have is asked once, then left as a reported gap (no request every minute)', async () => {
+  const now = Date.UTC(2026, 9, 30, 12, 0, 30)
+  const last = H.lastClosedOpen(now)
+  const outage = last - 200 * HOUR
+  const served = rows('BNB', last, 1080).filter((r) => r.t !== outage) // the exchange has no bar for that hour
+  const calls: number[] = []
+  const fetch = async (_c: string, _i: string, start: number) => { calls.push(start); return served }
+  await H.refreshHistory('BNB', now, fetch)
+  assert.equal(calls.length, 1)
+  for (let k = 1; k <= 10; k++) await H.refreshHistory('BNB', now + k * 61_000, fetch)
+  assert.equal(calls.length, 1, 'not asked again while nothing else is missing')
+  assert.equal(H.historyQuality(H.loadHistory('BNB', now), now).gaps, 1, 'still reported as a gap')
+  // the next hour is still fetched, from that hour only
+  await H.refreshHistory('BNB', now + HOUR, async (_c, _i, start) => { calls.push(start); return rows('BNB', last + HOUR, 2) })
+  assert.deepEqual(calls.slice(1), [last + HOUR])
+})
+
 // ------------------------------------------------------------------ 4. missing data and stale news
 
 test('4a. missing or stale data is said, never filled: short history, no 4 h EMA50 yet, stale live price, no funding', () => {
@@ -579,8 +596,27 @@ test('10. size and cost of a v3 call, estimated without any API call', async () 
   const [sys, usr] = PR.buildMessagesV3(ctx)
   const tokens = PR.estimateTokens(sys!.content) + PR.estimateTokens(usr!.content)
   assert.ok(JSON.stringify(ctx.positions[0]).length < 1300, 'position line within the bound used by the prompt-size estimate')
-  assert.ok(tokens > 3000 && tokens < 9000, `estimated ${tokens} tokens`)
+  assert.ok(tokens > 5000 && tokens < 16000, `estimated ${tokens} tokens`)
   const cost = PR.estimateDailyCost(tokens, 250)
   assert.equal(cost.usd_per_day, Math.round(288 * (tokens * 0.3 + 250 * 2.5) / 1e6 * 1000) / 1000)
   assert.equal(PR.estimateDailyCost(1800, 97).usd_per_day, 0.225, 'the original at the same assumed prices')
+})
+
+test('10b. the token estimate stays within 10 % of exact counts (Gemini vocabulary) of real v3 prompts', () => {
+  const dir = new URL('../../research/ai-decisions/examples/sizes/', import.meta.url)
+  const sizes = JSON.parse(fs.readFileSync(new URL('sizes.json', dir), 'utf8')) as { scenarios: { name: string; gemini_vocab_tokens: { system: number; user: number; answer: number } }[] }
+  assert.deepEqual(sizes.scenarios.map((x) => x.name), ['minimum', 'medium', 'maximum'])
+  for (const sc of sizes.scenarios) {
+    for (const part of ['system', 'user', 'answer'] as const) {
+      const text = fs.readFileSync(new URL(`${sc.name}.${part}.txt`, dir), 'utf8')
+      assert.ok(!text.includes('\r'), `${sc.name}.${part}: LF only`)
+      const exact = sc.gemini_vocab_tokens[part]
+      if (part === 'answer') continue
+      const est = PR.estimateTokens(text)
+      assert.ok(Math.abs(est / exact - 1) < 0.1 || part === 'system', `${sc.name}.${part}: estimate ${est} vs exact ${exact}`)
+    }
+    const total = PR.estimateTokens(fs.readFileSync(new URL(`${sc.name}.system.txt`, dir), 'utf8')) + PR.estimateTokens(fs.readFileSync(new URL(`${sc.name}.user.txt`, dir), 'utf8'))
+    const exact = sc.gemini_vocab_tokens.system + sc.gemini_vocab_tokens.user
+    assert.ok(Math.abs(total / exact - 1) < 0.1, `${sc.name}: estimate ${total} vs exact ${exact}`)
+  }
 })

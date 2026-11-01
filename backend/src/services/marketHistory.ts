@@ -14,6 +14,9 @@
  * - At most one request per coin per closed hour; after a failure no new
  *   request for retryMs (what is stored stays usable and is reported with
  *   its age).
+ * - An hour the exchange does not have (absent from an answer that holds
+ *   later bars, e.g. after an exchange outage) is not asked for again in
+ *   this process; it stays a gap, reported in the data quality.
  * - Bars older than keepDays are pruned.
  */
 import { and, asc, desc, eq, gte, lt } from 'drizzle-orm'
@@ -105,10 +108,13 @@ export function historyQuality(bars: HourBar[], now: number): HistoryQuality {
 }
 
 const attempts = new Map<string, { lastAt: number; blockedUntil: number }>()
+/** Hours confirmed absent at the exchange, by coin (not asked for again; kept while inside the window). */
+const absent = new Map<string, Set<number>>()
 
 /** Clears the request bookkeeping (tests: a "restart" of the process). */
 export function resetHistoryState(): void {
   attempts.clear()
+  absent.clear()
 }
 
 export interface RefreshResult {
@@ -135,9 +141,11 @@ export async function refreshHistory(symbol: string, now: number, fetchCandles: 
   // first hour missing in the window
   let from: number | null = null
   const have = new Set(stored)
+  const known = absent.get(symbol) ?? new Set<number>()
+  for (const t of known) if (t < windowStart) known.delete(t)
   if (!stored.length) from = windowStart
   else {
-    for (let t = Math.max(windowStart, stored[0]!); t <= target; t += HISTORY.ms) if (!have.has(t)) { from = t; break }
+    for (let t = Math.max(windowStart, stored[0]!); t <= target; t += HISTORY.ms) if (!have.has(t) && !known.has(t)) { from = t; break }
   }
   if (from === null) return result
   const a = attempts.get(symbol)
@@ -163,6 +171,13 @@ export async function refreshHistory(symbol: string, now: number, fetchCandles: 
       tx.delete(marketBars).where(and(eq(marketBars.symbol, symbol), lt(marketBars.openTime, windowStart))).run() // keepDays = the backfill window
     })
     result.stored = rows.length
+    // hours of the asked range the exchange did not send although it sent later ones: absent there, not asked again
+    const got = new Set(rows.map((r) => r.openTime))
+    const lastGot = rows.length ? Math.max(...got) : null
+    if (lastGot !== null) {
+      for (let t = from; t < lastGot; t += HISTORY.ms) if (!got.has(t) && !have.has(t)) known.add(t)
+      if (known.size) absent.set(symbol, known)
+    }
     if (result.refused.length) logger.warning(`Market history ${symbol}: ${result.refused.length} bar(s) refused (${[...new Set(result.refused)].join('; ')})`)
   } catch (e) {
     result.error = String(e)

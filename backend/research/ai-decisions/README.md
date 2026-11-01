@@ -133,5 +133,34 @@ executed, recorded as rejected; numbers in the text that are not in the data →
 passed to the engine unchanged; the engine's checks, the exit module and the cooldown apply as before.
 
 Example and size, offline from the committed data: `npx tsx research/ai-decisions/prompt-v3-example.mts --protection C3 --out <file>`
-(rendered: `examples/prompt-v3-2026-10-28T1837Z-C3.txt`). About 4,500 estimated tokens for a flat account; about 6,900–7,700 with one
-position, 6 decisions in memory and 8 news items (characters / 3.2: an estimate, not a measurement of Gemini's tokenizer).
+(rendered: `examples/prompt-v3-2026-10-28T1837Z-C3.txt`).
+
+## Task 007F-BACKUP: measured size of the v3 prompt (no API call)
+
+Token counts are exact for the Gemini vocabulary: `count_tokens.py` reimplements the BPE of a Gemma 3 `tokenizer.json`
+(Gemma 3 uses the Gemini tokenizer; the file is not in the repository). On the 36 recorded gemini-3.5-flash-lite calls the
+reported `prompt_tokens` = count + 1 for every prompt and `completion_tokens` = count for every answer. The same calls reported
+no hidden reasoning tokens (`total_tokens` = prompt + completion).
+
+Prompts built by `v3-prompt-sizes.mts` with the app's code and real committed prices; positions, decisions and news are
+constructed at realistic lengths (`examples/sizes/`):
+
+| Scenario | Content | Input tokens (system + user) | Answer tokens |
+|---|---|---|---|
+| minimum | flat, exit module off, no memory, no news | 823 + 5,262 = 6,085 | 169 (hold) |
+| medium | 1 position with C3 plan, 4 decisions, 4 news | 885 + 6,926 = 7,811 | 275 (open) |
+| maximum | 6 positions with C2 plans, 6 decisions, 8 long news | 908 + 12,137 = 13,045 | 482 (close, 5 factors) |
+| original v1 (recorded) | | 1,751–1,826 | 45–116 |
+
+The digits cost one token each, so the market JSON costs about 2 characters per token (prose: 3.4). The 007F estimate
+(characters / 3.2) was 30–40 % low; `estimateTokens` now counts digits apart (within 6 % of the exact counts, test 10b).
+
+Possible reductions, measured on the same prompts (`compact_study.py`, study only, the prompt is unchanged):
+
+| Change (tokens of the user message) | minimum | medium | maximum |
+|---|---|---|---|
+| A: drop repeated fields (mid = price, fee per coin, quality when ok, swing distances) | −16.8 % | −12.6 % | −7.2 % |
+| A + B: 5 significant digits | −19.4 % | −14.7 % | −8.4 % |
+| A + B + C: the six markets as one table (header once) | −50.0 % | −37.9 % | −21.6 % |
+
+C keeps every value but a wide table is harder to read for a model: it would need its own offline and paper check.

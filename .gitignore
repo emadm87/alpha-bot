@@ -159,3 +159,7 @@ backend/.DS_Store
 
 # Pilot AI runs (database, log, trace: private, never committed)
 backend/pilot/runs/
+
+# Python bytecode (research scripts)
+__pycache__/
+*.pyc

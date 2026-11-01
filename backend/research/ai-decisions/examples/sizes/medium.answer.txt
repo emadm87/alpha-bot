@@ -1,0 +1,20 @@
+{
+  "operation": "open",
+  "symbol": "BTC",
+  "direction": "long",
+  "target_portion_of_balance": 0.3,
+  "leverage": 3,
+  "thesis": "BTC keeps a higher low above the 24 h range low; a move to the 24 h high is likely within 8 hours unless the 4h trend turns down further.",
+  "invalidation_price": 80404,
+  "target_price": 81804,
+  "time_horizon_hours": 8,
+  "confidence": "medium",
+  "key_factors": [
+    "1h EMA20 above EMA50",
+    "RSI 51.39",
+    "relative volume 2.18",
+    "24 h high 81804"
+  ],
+  "changed_since_last": "price moved back above the 1h EMA20 (80826.9) since the last cycle",
+  "reason": "Momentum recovered on rising volume with a defined invalidation below the last swing low and a target at the 24 h high."
+}

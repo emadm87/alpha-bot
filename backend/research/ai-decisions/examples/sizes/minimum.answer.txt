@@ -1,0 +1,18 @@
+{
+  "operation": "hold",
+  "symbol": null,
+  "direction": null,
+  "target_portion_of_balance": 0,
+  "leverage": 1,
+  "thesis": "No clear edge: all six coins trade inside their 24 h ranges.",
+  "invalidation_price": null,
+  "target_price": null,
+  "time_horizon_hours": null,
+  "confidence": "low",
+  "key_factors": [
+    "BTC RSI 51.39",
+    "relative volume 2.18"
+  ],
+  "changed_since_last": "first decision",
+  "reason": "Nothing aligned enough to pay the costs."
+}

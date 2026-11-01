@@ -1,0 +1,21 @@
+{
+  "operation": "close",
+  "symbol": "ETH",
+  "direction": "short",
+  "target_portion_of_balance": 1,
+  "leverage": 3,
+  "thesis": "ETH keeps a higher low above the 24 h range low; a move to the 24 h high is likely within 8 hours unless the 4h trend turns down further. SOL keeps a higher low above the 24 h range low; a move to the 24 h high is likely within 8 hours unless the 4h trend turns down further.",
+  "invalidation_price": 2386.6,
+  "target_price": 2322.7,
+  "time_horizon_hours": 6,
+  "confidence": "high",
+  "key_factors": [
+    "ETH RSI 49.36 vs 44.86 on 4h",
+    "4h EMA20 2344.45 below EMA50 2369.14",
+    "price 0.23 ATR from the nearest level above 2350.3",
+    "funding 0.00125% per hour paid by longs",
+    "net P&L +0.42% of entry value"
+  ],
+  "changed_since_last": "ETH moved from 2347 to 2322.7, the 24 h low, and the structure changed from higher low to lower low; BTC and SOL unchanged; the exit plan of ETH is now 1.1 ATR from its stop.",
+  "reason": "ETH holds above the 1h EMA20 at 2254.4 with RSI 51.39 and relative volume 2.18; the 4h EMA20 is still below the EMA50 and the 24 h high caps the move, so I keep the position and watch the nearest level below for a break that would invalidate the long idea. Closing the short locks the move to the 24 h low before the funding and the spread erode it."
+}
