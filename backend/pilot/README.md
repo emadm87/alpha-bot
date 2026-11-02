@@ -160,9 +160,10 @@ comportamento sono identici alla versione originale (verificato: stesso SHA-256 
 | `--position-info v2` | `ALPHA_POSITION_INFO=v2` | All'AI: `entry_value` distinto da `current_value` (in v1 `current_value` era quantità × prezzo di ingresso), `current_price`, `unrealized_pnl`, `fees_paid`, `estimated_exit_fee`, `financing_net`, `estimated_net_pnl_if_closed_now`, `return_on_margin_pct`, `opened_at`, `holding_minutes`; con il modulo acceso anche `exit_plan` (stop, livello di uscita, target, rischio allo stop) e la riga dei cooldown attivi. |
 | `--protection C1` / `C2` / `C3` | `ALPHA_PROTECTION=C1…` | Gestione delle uscite, **solo modello `hyperliquid`**, nel monitor cross margin (5 s), a mark price valido e fresco. |
 | `--protection-config '{...}'` | `ALPHA_PROTECTION_CONFIG` | Parametri diversi dai default (JSON convalidato: un valore sconosciuto o fuori intervallo ferma l'app all'avvio). |
+| `--prompt v1` / `v3` / `v4` | `ALPHA_PROMPT=…` | Prompt dell'AI. `v1` originale (default); `v3` contesto di mercato, memoria, notizie filtrate, risposta convalidata (007F); `v4` come v3 piu confronto LONG/SHORT/HOLD con lo stesso standard, una sola convenzione dei segni (`price_minus_<x>_atr`), riferimenti LONG/SHORT con il modulo di uscita, memoria senza il testo dei ragionamenti precedenti, `max_tokens` 1500 (008; `research/ai-decisions/README.md`). |
 
 Il launcher scrive la variante in `run-meta.json` (`plan.experiment`) e nel report, e **si ferma prima di
-creare il conto** se l'app non conferma nel log `Experiment config: position_info=… protection=…`.
+creare il conto** se l'app non conferma nel log `Experiment config: position_info=… protection=… prompt=…`.
 
 **Regole** (`src/services/exitRules.ts`; Gemini decide ingressi, dimensione e leva):
 

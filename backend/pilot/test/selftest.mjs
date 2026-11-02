@@ -703,6 +703,7 @@ await step('launcher: variante sperimentale nel piano (default originale), valor
   assert.deepEqual(plan([]).experiment, { position_info: 'v1', protection: 'off', protection_config: null, prompt: 'v1' })
   assert.deepEqual(plan(['--position-info', 'v2', '--protection', 'c2', '--protection-config', '{"cooldownMs":3600000}', '--prompt', 'V3']).experiment,
     { position_info: 'v2', protection: 'C2', protection_config: { cooldownMs: 3600000 }, prompt: 'v3' })
+  assert.equal(plan(['--prompt', 'v4']).experiment.prompt, 'v4', '008: v4 only on explicit choice')
   for (const bad of [['--position-info', 'v3'], ['--protection', 'on'], ['--protection', 'C4'], ['--protection-config', '{oops'], ['--protection-config', '[1]'], ['--prompt', 'v2']]) {
     assert.equal(runPilot(path.join(tmp, 'no-auth'), 'complete', bad).status, 64, bad.join(' '))
   }

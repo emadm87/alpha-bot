@@ -96,9 +96,10 @@ function entryReason(accountId: number, symbol: string, openedAt: number) {
     .orderBy(desc(aiDecisionsV3.at)).get()
   if (v3) {
     const d = JSON.parse(v3.decision) as Record<string, unknown>
-    const c = JSON.parse(v3.context) as { snapshot?: BriefSnapshot | null }
+    const c = JSON.parse(v3.context) as { snapshot?: BriefSnapshot | null; prompt?: string }
     return {
-      source: 'v3 decision' as const, reason: cut(d.reason, MEMORY_LIMITS.maxReasonChars), thesis: cut(d.thesis, MEMORY_LIMITS.maxThesisChars),
+      // the table holds v3 and v4 decisions (Task 008); a v3 decision keeps its original label
+      source: c.prompt === 'v4' ? 'v4 decision' as const : 'v3 decision' as const, reason: cut(d.reason, MEMORY_LIMITS.maxReasonChars), thesis: cut(d.thesis, MEMORY_LIMITS.maxThesisChars),
       invalidation_price: num(d.invalidation_price), target_price: num(d.target_price), snapshot: c.snapshot ?? null,
     }
   }

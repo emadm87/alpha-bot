@@ -164,3 +164,83 @@ Possible reductions, measured on the same prompts (`compact_study.py`, study onl
 | A + B + C: the six markets as one table (header once) | −50.0 % | −37.9 % | −21.6 % |
 
 C keeps every value but a wide table is harder to read for a model: it would need its own offline and paper check.
+
+## Task 008: v4 (experimental, opt-in `ALPHA_PROMPT=v4`)
+
+### What is proven and what is only a hypothesis
+
+| Finding | Status | Evidence |
+|---|---|---|
+| v3 MARKETS header says distances are "level minus price", while `price_vs_ema20_atr`, `price_vs_ema50_atr` (1h) and `price_vs_ema50_atr` (4h) are price minus EMA: two opposite conventions under one header | **proven** (code) | `marketContext.ts`, `promptV3.ts`; on the October data 1,111 of 5,580 v3 distance values contradict the header (`examples/v4/compare.json`); test 3 of `src/services/aiV4.test.ts` |
+| v3 memory repeats the model's earlier reason (220 chars) and thesis (160) for up to 6 decisions | **proven** (code) | `v3Context.decisionMemory` |
+| A v3 HOLD with no symbol carries no price change in the memory (`price_then` null) | **proven** (code) | same |
+| v3 asks for one decision, not for an explicit comparison of LONG, SHORT and HOLD; "holding is a valid decision" is the only explicit guidance on the outcome | **proven** (prompt text) | `promptV3.ts` |
+| 22 consecutive HOLDs, bearish reasons centred on the 4 h EMAs, shorts not argued | **reported** (2 Nov pilot and the one before; traces on the notebook, not in this repository) | pilot reports |
+| The HOLDs were wrong, or caused by the sign ambiguity or by anchoring on earlier reasons | **hypothesis**, not shown | a HOLD may be right; in October 75 % of coin-hours had the 4 h EMA20 below the EMA50 (`compare.json`), so bearish 4 h readings were common in the data |
+
+### What v4 changes (v1 and v3 byte-identical, test 1)
+
+- `marketContextV4.ts`: every distance is `price_minus_<x>_atr` = (price − x) / ATR(14, 1h), positive = price above x (0 contradictions on the October data); adds the 4 h price–EMA20 distance, EMA20–EMA50 gaps, position in the 24 h / 7 d range, the round-trip cost and the costs in R; `if_opened_now` for LONG and for SHORT with the exit module's stop (and C3 take profit / C2 partial), the levels in the way (at most 3) and the funding for that side. Same rules for both sides: mirrored prices swap them exactly (test 4).
+- `promptV4.ts`: every cycle, the best LONG candidate, the best SHORT candidate and HOLD are argued to the same standard; none is the default; nothing has to be aligned; a downtrend is a reason to examine a SHORT as much as to avoid a LONG; earlier decisions are not evidence. `max_tokens` 1500 (v3: 1000) because the answer carries the three alternatives (636 tokens measured on a constructed answer) and Gemini's thinking counts in the same limit. Temperature 0.7 as before.
+- `v4Context.ts`: memory lists earlier decisions without their reasoning text; what changed since the last decision is computed for all six coins (v4 stores every coin's snapshot with each decision; a v3 row gives the price change only). An open position still shows its entry thesis (needed to manage it).
+- `aiDecisionV4.ts`: the v3 validation unchanged (same blocking rule for an `open`); the alternatives are checked (present, symbols, levels on the right side, the open matches its side, numbers from the data) and **flagged, never blocking**.
+- Unchanged: orders, fees, sizing, leverage, C1/C2/C3, cooldown, the 007G attempt limit, the cadence.
+
+### Offline comparison on the same data (`compare-v3-v4.mts`, October 2026, 62 times x 6 coins)
+
+| | v3 | v4 |
+|---|---|---|
+| Distance values contradicting the stated convention | 1,111 / 5,580 | 0 / 8,301 (more values: re-signed v3 ones plus the references) |
+| Keys per coin | 88 | 125 |
+| Null values (missing data) | 744 | 744 (the same: impact prices and 24 h volume are not in the offline data) |
+| LONG / SHORT references | none | both, same rules; levels in the way 1,020 long / 921 short; funding paid by long 325 / short 47 (October data) |
+| Input tokens, exact, sample 28 Oct 12:00 (flat, C3, no memory/news) | 6,086 | 8,700 (+43 %) |
+
+Not measurable offline: what Gemini would decide with v4, how often it would trade, any P&L.
+
+### Tokens and cost (no API call; paid prices are the assumption used so far, $0.30 / $2.50 per 1M, not verified)
+
+| Prompt | Input tokens | Output tokens | USD per call | 288 / day | 96 / day | 48 / day |
+|---|---|---|---|---|---|---|
+| v3 medium (measured, 007F-BACKUP) | 7,812 | 275 | 0.0030 | 0.87 | 0.29 | 0.15 |
+| v4 flat (measured) | 8,700 | ~640 | 0.0042 | 1.21 | 0.40 | 0.20 |
+| v4 medium (estimate: v4 flat + the 1,726 tokens the v3 position/memory/news blocks measured) | ~10,400 | ~640 | 0.0047 | 1.36 | 0.45 | 0.23 |
+| v4 maximum (estimate: v4 flat + the 6,960 tokens of the v3 maximum blocks: 6 positions, 6 decisions, 8 news) | ~15,700 | ~800 | 0.0067 | 1.93 | 0.64 | 0.32 |
+
+A 12-cycle paper test with v4 costs about $0.05 at paid prices, $0 within the free tier. Requests per day are the same as
+v3 (one per cycle); tokens per minute stay under ~16k. The free-tier limits of the user's project must be checked in
+AI Studio (see 007F-BACKUP); nothing here assumes they are sufficient.
+
+### Residual risks
+
+- Bigger prompt (+43 %) and longer answers: more latency, so more 30 s client timeouts are possible (the 2 Nov v3 pilot had none, an earlier one had 2); the 007G limit stops the run if attempts run out. The client timeout is not changed.
+- `max_tokens` 1500 lowers but does not remove truncation if Gemini thinks more; watch `finish_reason` and `completion_tokens`.
+- Asking for LONG and SHORT candidates every cycle may change how often the model trades; v4 is not built to trade more and HOLD stays an equal option, but only the paper test will show the effect.
+- The alternatives are validated but not enforced (flags only); the number check is a heuristic.
+- `if_opened_now` is a reference with the exit module's rules (2 ATR stop, C3 +2R); offline the costs in R lack the spread.
+- The first v4 cycle has no "changes since" (no earlier v4 decision); a v3 row gives price changes only.
+
+### Future paper test (not started; needs your authorization)
+
+```
+git fetch origin claude/exp-008-ai-v4 && git checkout claude/exp-008-ai-v4
+cd backend && npm ci && npx tsx --test src/services/aiV4.test.ts && node pilot/test/selftest.mjs
+node pilot/run-pilot.mjs --run-dir pilot/runs/<new folder> --cost-model hyperliquid --position-info v2 --protection C3 --prompt v4 --cycles 12 --max-attempts <N> --key-mode env --key-env GEMINI_API_KEY
+# without --authorized: plan only; then the same command with --authorized; the log must confirm
+# "Experiment config: position_info=v2 protection=C3 prompt=v4" and "[ai-budget] attivo: max <N> ..."
+```
+
+Optional, same period: a second launcher with `--prompt v3` on another `--port` and `--run-dir` (doubles the calls).
+
+### Evaluation criteria (fixed before the test)
+
+| Area | Measure | Pass for a first test |
+|---|---|---|
+| Process | valid JSON; `alternatives` complete (long, short, hold); open consistent with its alternative | ≥ 11 / 12 valid, 0 blocked by format |
+| Balance | cycles naming a LONG and a SHORT candidate (or arguing "none" with data); share of SHORT cases argued when the 4 h EMA20 < EMA50 | both sides argued in ≥ 10 / 12 |
+| Grounding | share of numbers found in the data (`numbers.verified / cited`); sign errors in the text (e.g. "price below EMA20" when `price_minus_ema20_atr` > 0), checked by hand on the trace | ≥ 90 %; 0 sign errors |
+| Anchoring | `changed_since_last` cites computed changes rather than repeating the earlier verdict | read on the trace |
+| Cost and reliability | `prompt_tokens` vs 8.7–10.4k, `completion_tokens`, `finish_reason`, latency, timeouts, attempts (007G log) | no truncation; attempts within the limit |
+| Outcome | trades, R, net P&L (hypothetical paper) | **not judged on 12 cycles**: needs ≥ 30 trades or ≥ 14 days, as for v3 |
+
+No target number of trades: a v4 that keeps holding with well-argued alternatives passes the process criteria.

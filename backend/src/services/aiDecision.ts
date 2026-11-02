@@ -19,6 +19,9 @@ import { positionInfoVersion } from './exitRules.js'
 import { buildMessagesV3, estimateTokens, promptVersion, V3_GENERATION } from './promptV3.js'
 import { markDecisionV3Outcome, parseV3, recordDecisionV3, validateDecisionV3 } from './aiDecisionV3.js'
 import { buildV3Context, type V3Context } from './v3Context.js'
+import { buildMessagesV4, V4_GENERATION } from './promptV4.js'
+import { validateDecisionV4 } from './aiDecisionV4.js'
+import { memoryV4 } from './v4Context.js'
 import { getLogger } from '../utils/logger.js'
 
 const logger = getLogger('services.aiDecision')
@@ -261,13 +264,17 @@ export async function callAIForDecision(
   try {
     // Task 007F: ALPHA_PROMPT=v3 builds the v3 context and messages; otherwise
     // (the default) the original prompt below, unchanged.
-    const v3 = promptVersion() === 'v3'
+    // Task 008: ALPHA_PROMPT=v4 uses the same context, its own messages and validation.
+    const version = promptVersion()
+    const v3 = version === 'v3' || version === 'v4'
     let v3ctx: V3Context | null = null
     let payload: { model: string | null; messages: { role: string; content: string }[]; temperature: number; max_tokens: number }
     if (v3) {
       const startedAt = Date.now()
       v3ctx = await buildV3Context(account, portfolio, prices, startedAt)
-      payload = { model: account.model, messages: buildMessagesV3(v3ctx), ...V3_GENERATION }
+      payload = version === 'v4'
+        ? { model: account.model, messages: buildMessagesV4(v3ctx, memoryV4(account.id, v3ctx.now, v3ctx.snapshots, v3ctx.prices)), ...V4_GENERATION }
+        : { model: account.model, messages: buildMessagesV3(v3ctx), ...V3_GENERATION }
     } else {
     const newsSummary = await fetchLatestNews()
     const newsSection = newsSummary || 'No recent CoinJournal news available.'
@@ -382,18 +389,20 @@ export async function callAIForDecision(
     if (v3ctx) {
       const promptText = payload.messages.map((m) => m.content).join('\n')
       const parsed = parseV3(textContent)
+      // v4 stores the snapshot of every coin, so the next v4 prompt can say what changed for each one
+      const v4extra = version === 'v4' ? { prompt: 'v4', snapshots: v3ctx.snapshots } : {}
       if ('error' in parsed) {
-        const id = recordDecisionV3(account, cycleId, v3ctx.now, { error: parsed.error, raw: textContent }, v3ctx)
+        const id = recordDecisionV3(account, cycleId, v3ctx.now, { error: parsed.error, raw: textContent }, v3ctx, v4extra)
         markDecisionV3Outcome(id, 'no_decision', parsed.error)
-        logger.error(`v3 answer refused for ${account.name}: ${parsed.error}`)
-        trace('api_error', { error: `v3: ${parsed.error}` })
+        logger.error(`${version} answer refused for ${account.name}: ${parsed.error}`)
+        trace('api_error', { error: `${version}: ${parsed.error}` })
         return null
       }
-      const validation = validateDecisionV3(parsed.value, v3ctx, promptText)
+      const validation = version === 'v4' ? validateDecisionV4(parsed.value, v3ctx, promptText) : validateDecisionV3(parsed.value, v3ctx, promptText)
       const id = recordDecisionV3(account, cycleId, v3ctx.now, { value: parsed.value, validation }, v3ctx, {
-        prompt_tokens_estimate: estimateTokens(promptText), news_items: v3ctx.news.items.length,
+        prompt_tokens_estimate: estimateTokens(promptText), news_items: v3ctx.news.items.length, ...v4extra,
       })
-      if (validation.issues.length) logger.warning(`v3 decision of ${account.name}: ${validation.issues.join('; ')}`)
+      if (validation.issues.length) logger.warning(`${version} decision of ${account.name}: ${validation.issues.join('; ')}`)
       decision = { ...(parsed.value as AIDecision), _v3: { id, rejected: validation.rejected, issues: validation.issues, numbers: validation.numbers } }
     } else {
     decision = parseDecisionText(unwrapCodeFence(textContent))

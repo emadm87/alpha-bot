@@ -1,0 +1,42 @@
+{
+  "_note": "CONSTRUCTED answer of the v4 schema at its suggested length, used ONLY to count output tokens; not a model decision",
+  "alternatives": {
+    "long": {
+      "symbol": "BNB",
+      "case_for": "Price above the 1h EMA20 and EMA50 with relative volume 1.4 and RSI 56; the 24 h high is 1.2 ATR away as the first level in the way.",
+      "case_against": "The 4h EMA20 is below the EMA50 and the price is 0.6 ATR under the 4h EMA50, so a bounce may stall at that average.",
+      "invalidation_price": 1088.5,
+      "target_price": 1121.9
+    },
+    "short": {
+      "symbol": "SOL",
+      "case_for": "Lower high and lower low on 1h, price under both 4h EMAs, MACD histogram negative and funding received by shorts.",
+      "case_against": "RSI 34 is already low, the 7 d low is only 0.9 ATR below and costs take 0.07 R.",
+      "invalidation_price": 188.4,
+      "target_price": 179.2
+    },
+    "hold": {
+      "case_for": "Neither side has a level-to-level move of 2R without a level in the way, and relative volume is below 1 on four coins.",
+      "case_against": "BNB shows the cleanest structure of the session and waiting gives up an entry near the EMA20."
+    }
+  },
+  "operation": "hold",
+  "symbol": null,
+  "direction": null,
+  "target_portion_of_balance": 0,
+  "leverage": 1,
+  "thesis": "No candidate offers 2R before the first level in the way after costs; recheck BNB if it closes above the 24 h high.",
+  "invalidation_price": null,
+  "target_price": null,
+  "time_horizon_hours": null,
+  "confidence": "medium",
+  "key_factors": [
+    "BNB 24 h high 1.2 ATR away",
+    "SOL RSI 34",
+    "4h EMA20 below EMA50 on 5 coins",
+    "relative volume under 1 on 4 coins",
+    "round-trip costs 0.07 R"
+  ],
+  "changed_since_last": "BNB moved above its 1h EMA50; SOL made a lower low; the others are within 0.3 ATR of the last decision.",
+  "reason": "HOLD beats the BNB long and the SOL short because neither reaches 2R before a level in the way after costs."
+}

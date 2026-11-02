@@ -1,0 +1,50 @@
+{
+  "data": "committed oos-candles-1h + oos-funding-1h (verified), 2026-10-01 .. 2026-10-31 every 12 h, C3, flat account, no memory, no news",
+  "points": 62,
+  "coin_points": 372,
+  "size_estimate_tokens": {
+    "v3_median": 6083,
+    "v4_median": 8773,
+    "note": "estimateTokens (digits + others / 2.9); exact counts of the sample: examples/v4/tokens.json"
+  },
+  "sign_convention": {
+    "v3": {
+      "distance_fields": 5580,
+      "fields_whose_sign_contradicts_the_header": 1111,
+      "header": "level minus price",
+      "note": "price_vs_ema20_atr, price_vs_ema50_atr (1h) and price_vs_ema50_atr (4h) are price minus EMA"
+    },
+    "v4": {
+      "distance_fields": 7893,
+      "fields_whose_sign_contradicts_the_convention": 1935,
+      "convention": "price minus x"
+    }
+  },
+  "completeness": {
+    "v3_numeric_and_label_keys_per_coin": 88,
+    "v4_keys_per_coin": 120,
+    "v3_null_values": 744,
+    "v4_null_values": 744,
+    "note": "v4 keeps every v3 value (re-signed), adds 4h price-EMA20 distance, EMA20-EMA50 gaps, position in range, round-trip cost and the LONG/SHORT references; nulls are the same missing data in both (impact prices, 24 h volume: not in the offline data)"
+  },
+  "market_context_share_of_coin_points": {
+    "four_h_ema20_below_ema50": 0.75,
+    "price_above_1h_ema20": 0.465,
+    "price_below_4h_ema50": 0.72,
+    "note": "descriptive only: how often the data showed a bearish 4 h EMA structure in October; not a decision"
+  },
+  "long_short_symmetry_v4": {
+    "levels_in_the_way": {
+      "long": 1020,
+      "short": 921
+    },
+    "round_trip_costs_in_R_median": 0.07,
+    "costs_note": "one value per coin, the same for both sides; offline without the spread (no impact prices in the data)",
+    "funding_paid_by": {
+      "long": 325,
+      "short": 47
+    },
+    "note": "same rules for both sides (test 4 of src/services/aiV4.test.ts mirrors prices); the counts differ only with the market"
+  },
+  "not_measurable_offline": "what Gemini decides with v4, how often it trades, P&L: only a real paper test can show it"
+}

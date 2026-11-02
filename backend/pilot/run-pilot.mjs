@@ -26,8 +26,10 @@
 //   --protection off | C1 | C2 | C3    gestione delle uscite, solo modello hyperliquid (007C): C1 stop 2 ATR + chandelier
 //                                      3 ATR; C2 stop 2 ATR, 25% a +1,5R, pareggio + chandelier; C3 stop 2 ATR, TP +2R
 //   --protection-config '{"cooldownMs":7200000}'  parametri diversi dai default (JSON, convalidato dall'app)
-//   --prompt v1 | v3                   prompt dell'AI (007F; v1 = originale; v3 = contesto di mercato, memoria,
-//                                      notizie filtrate, risposta convalidata). Stessa cadenza: una chiamata per ciclo
+//   --prompt v1 | v3 | v4              prompt dell'AI (007F/008; v1 = originale; v3 = contesto di mercato, memoria,
+//                                      notizie filtrate, risposta convalidata; v4 = v3 + confronto LONG/SHORT/HOLD,
+//                                      una sola convenzione dei segni, memoria senza ancoraggio). Stessa cadenza:
+//                                      una chiamata per ciclo
 //
 // Chiave AI (--key-mode env): il conto contiene solo il segnaposto; la chiave viene aggiunta alle sole
 // richieste verso l'host AI dal preload key-inject.mjs nel processo dell'app (mai nel database o nei log).
@@ -97,7 +99,7 @@ if (!['original', 'hyperliquid'].includes(cfg.costModel)) fail(64, `--cost-model
 if (!['on', 'off'].includes(cfg.guard)) fail(64, `--guard non valido: ${cfg.guard}`)
 if (!['v1', 'v2'].includes(cfg.positionInfo)) fail(64, `--position-info non valido: ${cfg.positionInfo}`)
 if (!['off', 'C1', 'C2', 'C3'].includes(cfg.protection)) fail(64, `--protection non valido: ${cfg.protection} (off, C1, C2 o C3)`)
-if (!['v1', 'v3'].includes(cfg.prompt)) fail(64, `--prompt non valido: ${cfg.prompt} (v1 o v3)`)
+if (!['v1', 'v3', 'v4'].includes(cfg.prompt)) fail(64, `--prompt non valido: ${cfg.prompt} (v1, v3 o v4)`)
 if (!Number.isInteger(cfg.maxAttempts) || cfg.maxAttempts < 1) fail(64, `--max-attempts non valido: ${flag('--max-attempts')} (intero >= 1)`)
 let aiHost
 try {

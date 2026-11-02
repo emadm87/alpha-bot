@@ -552,7 +552,7 @@ test('9. original (default): prompt byte-identical to the original, one user mes
   assert.equal(text.length, 2077)
   assert.equal(PR.promptVersion({}), 'v1')
   assert.equal(PR.promptVersion({ ALPHA_PROMPT: ' V1 ' }), 'v1')
-  assert.throws(() => PR.promptVersion({ ALPHA_PROMPT: 'v2' }), /ALPHA_PROMPT must be v1 or v3/)
+  assert.throws(() => PR.promptVersion({ ALPHA_PROMPT: 'v2' }), /ALPHA_PROMPT must be v1, v3 or v4/)
   assert.throws(() => P.describeExperiment({ ALPHA_PROMPT: 'yes' }), /ALPHA_PROMPT/)
   assert.equal(P.describeExperiment({ ALPHA_PROMPT: 'v3' }), 'Experiment config: position_info=v1 protection=off prompt=v3')
   // the real path with the flag unset
