@@ -7,7 +7,9 @@
 //   node pilot/run-pilot.mjs --authorized --run-dir <cartella-nuova> [opzioni]
 // Opzioni:
 //   --cycles 12             cicli AI da completare (eventi `outcome` nella traccia)
-//   --max-attempts 12       tentativi HTTP verso l'AI oltre i quali si arresta
+//   --max-attempts 12       tentativi HTTP verso l'AI, retry e timeout compresi: limite RIGIDO (007G). Il preload
+//                           ai-budget.mjs, sempre caricato nell'app, conta ogni tentativo prima dell'invio e rifiuta
+//                           senza inviarlo ogni tentativo oltre il limite; il launcher si ferma al primo rifiutato
 //   --timeout-min 62        arresto comunque dopo N minuti dalla creazione del conto
 //   --port 5611             porta HTTP locale dell'app
 //   --model gemini-3.5-flash-lite
@@ -96,6 +98,13 @@ if (!['on', 'off'].includes(cfg.guard)) fail(64, `--guard non valido: ${cfg.guar
 if (!['v1', 'v2'].includes(cfg.positionInfo)) fail(64, `--position-info non valido: ${cfg.positionInfo}`)
 if (!['off', 'C1', 'C2', 'C3'].includes(cfg.protection)) fail(64, `--protection non valido: ${cfg.protection} (off, C1, C2 o C3)`)
 if (!['v1', 'v3'].includes(cfg.prompt)) fail(64, `--prompt non valido: ${cfg.prompt} (v1 o v3)`)
+if (!Number.isInteger(cfg.maxAttempts) || cfg.maxAttempts < 1) fail(64, `--max-attempts non valido: ${flag('--max-attempts')} (intero >= 1)`)
+let aiHost
+try {
+  aiHost = new URL(cfg.baseUrl).hostname
+} catch {
+  fail(64, `--base-url non valido: ${cfg.baseUrl}`)
+}
 if (cfg.protectionConfig) {
   try {
     const parsed = JSON.parse(cfg.protectionConfig)
@@ -119,6 +128,7 @@ const files = {
   check: path.join(runDir, 'check.json'),
   report: path.join(runDir, 'report.json'),
   stop: path.join(runDir, 'STOP'),
+  attempts: path.join(runDir, 'ai-attempts.jsonl'),
 }
 const useShim =
   cfg.proxyShim === 'on' || (cfg.proxyShim === 'auto' && Boolean(process.env.HTTPS_PROXY || process.env.https_proxy))
@@ -129,6 +139,8 @@ const plan = {
   capital_usdc: 1000, cost_model: cfg.costModel, markets: 'BTC ETH SOL BNB XRP DOGE (prompt originale)', interval_s: 300,
   guard: cfg.guard,
   experiment,
+  // limite preventivo dei tentativi AI (ai-budget.mjs nel processo dell'app)
+  ai_budget: { max_attempts: cfg.maxAttempts, host: aiHost, log: files.attempts },
 }
 if (!cfg.authorized) {
   console.log(JSON.stringify({ status: 'not_started', reason: 'manca --authorized: nessuna chiamata AI eseguita', plan }, null, 2))
@@ -171,10 +183,17 @@ if (useShim) {
 }
 if (cfg.keyMode === 'env') {
   env.ALPHA_PILOT_KEY_ENV = cfg.keyEnv
-  env.ALPHA_PILOT_KEY_HOST = new URL(cfg.baseUrl).hostname
+  env.ALPHA_PILOT_KEY_HOST = aiHost
   env.ALPHA_PILOT_KEY_PLACEHOLDER = PLACEHOLDER_KEY
   env.NODE_OPTIONS = `${env.NODE_OPTIONS ?? ''} --import ${pathToFileURL(path.join(here, 'key-inject.mjs')).href}`.trim()
 }
+// Limite RIGIDO dei tentativi AI (007G), sempre attivo: caricato per ultimo, quindi esterno a key-inject (un
+// tentativo rifiutato non arriva nemmeno all'inserimento della chiave). Valori del launcher, non dell'ambiente.
+env.AI_BUDGET_HOST = aiHost
+env.AI_BUDGET_MAX = String(cfg.maxAttempts)
+env.AI_BUDGET_FILE = files.attempts
+delete env.AI_BUDGET_STOP_ON // default: nessun altro invio dopo 401/403/404
+env.NODE_OPTIONS = `${env.NODE_OPTIONS ?? ''} --import ${pathToFileURL(path.join(here, 'ai-budget.mjs')).href}`.trim()
 // L'app gira in UN solo processo Node (loader tsx caricato con --import): la CLI di tsx avvierebbe
 // un secondo processo che su Windows resterebbe orfano quando il primo viene terminato.
 const command = cfg.testBackend
@@ -207,7 +226,8 @@ let guardResult = null
 saveMeta()
 const read = (f) => (fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : '')
 const evaluate = () =>
-  evaluateRun({ logText: read(files.log), traceText: read(files.trace), maxAttempts: cfg.maxAttempts, expectCycles: cfg.cycles })
+  evaluateRun({ logText: read(files.log), traceText: read(files.trace), attemptsText: read(files.attempts), maxAttempts: cfg.maxAttempts, expectCycles: cfg.cycles })
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
 async function stopApp(status, reasons) {
   meta.status = status
@@ -289,7 +309,9 @@ async function doFinish(status, reasons) {
   }
   console.log(JSON.stringify({
     status: meta.status, reasons: meta.reasons, cycles: check.cycles, outcomes: check.outcomes,
-    attempts: check.trace?.http_attempts_estimate ?? 0, blocking: check.blocking,
+    attempts: check.attempts?.sent ?? check.trace?.http_attempts_estimate ?? 0,
+    attempts_blocked: check.attempts ? check.attempts.blocked_budget + check.attempts.blocked_after_error : null,
+    attempts_estimate_from_log: check.trace?.http_attempts_estimate ?? 0, blocking: check.blocking,
     final_equity: report?.capital.final_equity ?? null, net_usdc: report?.pnl.net_usdc ?? null,
     reconciliation_ok: report?.reconciliation.ok ?? null, files,
   }, null, 2))
@@ -309,6 +331,9 @@ const startup = evaluate()
 const startupProblems = [
   ...(exited ? [`app terminata all'avvio: ${JSON.stringify(exited)}`] : []),
   ...(cfg.keyMode === 'env' && !/\[key-inject\] attivo/.test(read(files.log)) ? ['preload key-inject non attivo: la chiave non verrebbe inviata'] : []),
+  // limite preventivo dei tentativi AI attivo nell'app, con il limite e l'host chiesti e nessun tentativo precedente
+  ...(new RegExp(`\\[ai-budget\\] attivo: max ${cfg.maxAttempts} tentativi verso ${escapeRe(aiHost)}, gia inviati 0\\r?$`, 'm').test(read(files.log))
+    ? [] : [`limite preventivo dei tentativi AI non attivo o diverso da max ${cfg.maxAttempts} verso ${aiHost}`]),
   // la variante sperimentale e quella chiesta: la riga la scrive l'app all'avvio (describeExperiment)
   ...(new RegExp(`Experiment config: position_info=${cfg.positionInfo} protection=${cfg.protection} prompt=${cfg.prompt}(\\s|$)`, 'm').test(read(files.log))
     ? [] : [`l'app non conferma la variante sperimentale richiesta (position_info=${cfg.positionInfo}, protection=${cfg.protection}, prompt=${cfg.prompt})`]),

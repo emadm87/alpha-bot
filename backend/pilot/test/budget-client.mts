@@ -4,6 +4,9 @@
 //      node --import tsx pilot/test/budget-client.mts <cicli>
 // TEST_ACCOUNT_KEY: chiave salvata nel conto (default test-placeholder-key); TEST_AUTH_LOG: file in cui il
 // server registra l'intestazione Authorization ricevuta (test di key-inject.mjs, 006J-4B).
+// TEST_SERVER_MODE (007G): 429 (default) | destroy (connessione chiusa: errore di rete, stesso ramo del timeout
+// nel client) | hang (nessuna risposta: scatta il timeout reale di 30 s del client). TEST_HITS: file con il numero
+// di richieste arrivate al server.
 import fs from 'node:fs'
 import http from 'node:http'
 import os from 'node:os'
@@ -12,9 +15,15 @@ import path from 'node:path'
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'budget-client-'))
 process.env.DATABASE_PATH = path.join(dir, 't.db')
 process.env.LOG_LEVEL = 'error'
+const mode = process.env.TEST_SERVER_MODE ?? '429'
+let hits = 0
 const srv = http.createServer((req, res) => {
   if (req.url?.startsWith('/rss')) return res.end('')
+  hits++
+  if (process.env.TEST_HITS) fs.writeFileSync(process.env.TEST_HITS, String(hits))
   if (process.env.TEST_AUTH_LOG) fs.appendFileSync(process.env.TEST_AUTH_LOG, `${req.headers.authorization ?? ''}\n`)
+  if (mode === 'destroy') return req.socket.destroy()
+  if (mode === 'hang') return
   res.writeHead(429, { 'Content-Type': 'application/json' })
   res.end('{"error":"rate limited"}')
 }).listen(0, '127.0.0.1')
@@ -33,6 +42,7 @@ const portfolio = { cash: 1000, frozen_cash: 0, total_assets: 1000, positions: {
 const cycles = Number(process.argv[2] ?? 1)
 const decisions = []
 for (let c = 0; c < cycles; c++) decisions.push(await callAIForDecision(account, portfolio, { BTC: 1 }))
+srv.closeAllConnections()
 srv.close()
 // il client del database ha aperto t.db: va chiuso prima di cancellarlo (Windows rifiuta con EBUSY)
 const { rawDb } = await import('../../src/db/client.js')

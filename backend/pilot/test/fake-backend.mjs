@@ -1,7 +1,9 @@
 // SOLO TEST: finto backend per verificare run-pilot.mjs senza rete, senza AI e senza l'app reale.
 // Scrive righe di log nel formato dell'app, serve POST /api/account e produce eventi di traccia 006B
 // con orari sintetici distanziati di 300 s. Scenario da FAKE_SCENARIO: complete | startup_fail | auth_error |
-// hl_429 (31 errori 429 Hyperliquid nell'ultima ora) | hl_blind (posizione aperta, monitor non valutato da 6 min).
+// hl_429 (31 errori 429 Hyperliquid nell'ultima ora) | hl_blind (posizione aperta, monitor non valutato da 6 min) |
+// ai_burst (007G: cicli ravvicinati con VERE richieste HTTP verso base_url del conto, fino a 3 tentativi per ciclo
+// come il client dell'app; il server AI di prova e locale e risponde 429).
 // Scrive il proprio pid in fake-pid (test di crash).
 import fs from 'node:fs'
 import http from 'node:http'
@@ -37,12 +39,38 @@ log('INFO', 'services.startup', 'All services initialized successfully')
 
 let cycle = 0
 const maxCycles = Number(process.env.FAKE_CYCLES ?? 12)
+let account = null
+// come callAIForDecision: fino a 3 tentativi per ciclo; un errore (anche il rifiuto del limite) porta al successivo
+async function aiCycle(n) {
+  while (!account) await new Promise((r) => setTimeout(r, 5)) // il primo ciclo parte prima della lettura del conto
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const res = await fetch(`${account.base_url}/chat/completions`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${account.api_key}` }, body: '{}',
+      })
+      await res.text()
+      if (res.status === 200) {
+        event(n, 'response', { response: { choices: [], usage: { prompt_tokens: 2000, completion_tokens: 100 } } })
+        event(n, 'outcome', { account_id: 2, status: 'hold', detail: 'No order placed' })
+        return
+      }
+      log('WARNING', 'services.aiDecision', `AI API rate limited (attempt ${attempt}/3), waiting 0.0s...`)
+    } catch (e) {
+      log('WARNING', 'services.aiDecision', `AI API request failed (attempt ${attempt}/3), retrying in 0.0s: ${e.message}`)
+    }
+  }
+  event(n, 'outcome', { account_id: 2, status: 'no_decision', detail: 'No usable AI decision; nothing executed' })
+}
 function runCycle() {
   if (cycle >= maxCycles) return
   cycle++
   clock += cycle === 1 ? 1000 : 300_000
   log('INFO', 'services.tradingCommands', 'Processing AI trading for account: pilot-fake')
   event(cycle, 'request', { account_id: 2, model: 'gemini-3.5-flash-lite', payload: { messages: [{ role: 'user', content: 'Total Assets: $1000.00' }] } })
+  if (scenario === 'ai_burst') {
+    void aiCycle(cycle)
+    return
+  }
   if (scenario === 'auth_error') {
     event(cycle, 'api_error', { status: 403, body: 'denied' })
     event(cycle, 'outcome', { account_id: 2, status: 'no_decision', detail: 'x' })
@@ -79,6 +107,7 @@ const server = http.createServer((req, res) => {
     req.on('data', (c) => (body += c))
     req.on('end', () => {
       const payload = JSON.parse(body)
+      account = payload
       db.prepare('INSERT INTO accounts (id, api_key, name, cost_model) VALUES (2, ?, ?, ?)')
         .run(payload.api_key, payload.name, payload.cost_model ?? 'original')
       hyperliquidScenario(payload.name)

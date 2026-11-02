@@ -1,8 +1,10 @@
 // ALPHA BOT pilota (006G-6D) — controllo di backend.log e della traccia 006B, in sola lettura.
 //
-// CLI:   node pilot/check-run.mjs <backend.log> [trace.jsonl] [--max-attempts N] [--expect-cycles N]
+// CLI:   node pilot/check-run.mjs <backend.log> [trace.jsonl] [--max-attempts N] [--expect-cycles N] [--attempts-file ai-attempts.jsonl]
 // Esito: 0 = OK, 1 = problemi bloccanti, 2 = STOP immediato (limite superato o errori).
-// Modulo: evaluateRun({ logText, traceText, maxAttempts, expectCycles }) usato da run-pilot.mjs.
+// Modulo: evaluateRun({ logText, traceText, attemptsText, maxAttempts, expectCycles }) usato da run-pilot.mjs.
+// Con attemptsText (registro di ai-budget.mjs, 007G) i tentativi sono quelli REALMENTE inviati, contati prima
+// dell'invio; senza, resta la stima dal log (richieste + righe di retry), che conta anche i retry bloccati.
 // Non legge chiavi, non fa richieste di rete, non scrive nulla.
 import fs from 'node:fs'
 import { fileURLToPath } from 'node:url'
@@ -12,7 +14,22 @@ const SCHEDULER_RESET = /services\.scheduler: Auto trading job reset successfull
 // \b prima di sk-: testo delle notizie come "risk-on-risk-off-..." non deve sembrare una chiave
 const KEY_PATTERN = /\bAIza[0-9A-Za-z_-]{20,}|Bearer (?!\[REDACTED\])[A-Za-z0-9._-]{8,}|\bsk-[A-Za-z0-9_-]{16,}/
 
-export function evaluateRun({ logText, traceText = '', maxAttempts = 12, expectCycles = 12 }) {
+/** Registro di ai-budget.mjs: tentativi inviati, bloccati senza invio, esiti per classe. */
+export function summarizeAttempts(attemptsText) {
+  const rows = attemptsText.split(/\r?\n/).filter(Boolean).flatMap((l) => {
+    try { return [JSON.parse(l)] } catch { return [] }
+  })
+  const classes = {}
+  for (const r of rows) if (r.class) classes[r.class] = (classes[r.class] ?? 0) + 1
+  return {
+    sent: rows.filter((r) => r.result === 'sent').length,
+    blocked_budget: rows.filter((r) => r.result === 'blocked_budget_exhausted').length,
+    blocked_after_error: rows.filter((r) => r.result === 'blocked_after_error').length,
+    classes,
+  }
+}
+
+export function evaluateRun({ logText, traceText = '', attemptsText = null, maxAttempts = 12, expectCycles = 12 }) {
   const lines = logText.split(/\r?\n/).filter((l) => LINE.test(l))
   const ts = (l) => Date.parse(l.slice(0, 24))
   const has = (re) => lines.filter((l) => re.test(l))
@@ -80,7 +97,8 @@ export function evaluateRun({ logText, traceText = '', maxAttempts = 12, expectC
     add('nessuna chiamata duplicata (<240 s)', dup === 0, `${dup}`)
     add('un solo modello', models.length <= 1, models.join(', '))
     add('nessuna chiave nella traccia', !leak)
-    if (httpAttempts > maxAttempts) stop.push(`limite tentativi superato: ${httpAttempts}/${maxAttempts}`)
+    // con il registro del limite preventivo vale il conteggio reale (sotto); la stima resta solo informativa
+    if (attemptsText === null && httpAttempts > maxAttempts) stop.push(`limite tentativi superato: ${httpAttempts}/${maxAttempts}`)
     let consecutive = 0
     let worst = 0
     for (const o of outcomes) {
@@ -92,6 +110,16 @@ export function evaluateRun({ logText, traceText = '', maxAttempts = 12, expectC
     if (leak) stop.push('possibile chiave nella traccia')
     if (authErrors.length > 0) stop.push('errore di autenticazione o modello (401/403/404)')
   }
+  let attempts = null
+  if (attemptsText !== null) {
+    attempts = { ...summarizeAttempts(attemptsText), max: maxAttempts }
+    if (trace) trace.http_attempts_sent = attempts.sent
+    // non dovrebbe mai accadere: il preload blocca prima dell'invio
+    if (attempts.sent > maxAttempts) stop.push(`limite tentativi superato: ${attempts.sent}/${maxAttempts} inviati`)
+    // limite raggiunto: si ferma al primo tentativo bloccato (non quando inviati = limite: l'ultima risposta
+    // ammessa puo essere ancora in arrivo e il ciclo puo completarsi; altri invii sono comunque impossibili)
+    else if (attempts.blocked_budget > 0) stop.push(`limite tentativi AI raggiunto: ${attempts.sent}/${maxAttempts} inviati, ${attempts.blocked_budget} bloccati senza invio`)
+  }
   if (failedReset.length || has(/Falling back to random trading/).length) stop.push('scheduler non affidabile')
   if (manual.length) stop.push('ordini manuali presenti')
   if (logLeak) stop.push('possibile chiave nel log')
@@ -100,7 +128,7 @@ export function evaluateRun({ logText, traceText = '', maxAttempts = 12, expectC
   return {
     checks, blocking: blocking.map((c) => c.name), cycles: cycles.length, expected: expectCycles,
     outcomes: outcomesCount, cycles_complete: outcomesCount >= expectCycles, scheduler_resets: resets.length,
-    trace, stop, exitCode: stop.length ? 2 : blocking.length ? 1 : 0,
+    trace, attempts, stop, exitCode: stop.length ? 2 : blocking.length ? 1 : 0,
   }
 }
 
@@ -111,6 +139,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === fs.realpathSync(proces
     return i >= 0 ? Number(args[i + 1]) : def
   }
   const files = args.filter((a, i) => !a.startsWith('--') && !(i > 0 && args[i - 1].startsWith('--')))
+  const attemptsFile = args.includes('--attempts-file') ? args[args.indexOf('--attempts-file') + 1] : null
   if (!files[0]) {
     console.error('uso: node pilot/check-run.mjs <backend.log> [trace.jsonl] [--max-attempts N] [--expect-cycles N]')
     process.exit(64)
@@ -118,6 +147,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === fs.realpathSync(proces
   const result = evaluateRun({
     logText: fs.readFileSync(files[0], 'utf8'),
     traceText: files[1] && fs.existsSync(files[1]) ? fs.readFileSync(files[1], 'utf8') : '',
+    attemptsText: attemptsFile ? (fs.existsSync(attemptsFile) ? fs.readFileSync(attemptsFile, 'utf8') : '') : null,
     maxAttempts: opt('--max-attempts', 12),
     expectCycles: opt('--expect-cycles', 12),
   })

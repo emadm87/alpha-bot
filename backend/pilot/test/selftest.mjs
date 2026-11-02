@@ -219,6 +219,109 @@ await step('ai-budget: dopo 401/403/404 nessuna altra richiesta viene inviata', 
   assert.deepEqual(JSON.parse(r.stdout.trim()), [429, 429, 429])
 })
 
+// --- 007G: limite preventivo dei tentativi AI -----------------------------------------------------------
+await step('ai-budget: limite esaurito durante i retry di tentativi in timeout -> il terzo non parte', () => {
+  const file = path.join(tmp, 'budget-timeout.jsonl')
+  const r = spawnSync(process.execPath, ['--import', budget, '--input-type=module', '-e', `
+    import http from 'node:http'
+    let hits = 0
+    const srv = http.createServer(() => { hits++ }).listen(0, '127.0.0.1') // nessuna risposta: timeout
+    await new Promise((r) => srv.once('listening', r))
+    const url = 'http://127.0.0.1:' + srv.address().port + '/v1beta/openai/chat/completions'
+    const out = []
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try { await fetch(url, { method: 'POST', signal: AbortSignal.timeout(300) }); out.push('response') }
+      catch (e) { out.push(/budget exhausted/.test(e.message) ? 'blocked' : e.name) }
+    }
+    srv.closeAllConnections(); srv.close()
+    console.log(JSON.stringify({ hits, out }))`], { encoding: 'utf8', env: { ...process.env, AI_BUDGET_HOST: '127.0.0.1', AI_BUDGET_MAX: '2', AI_BUDGET_FILE: file } })
+  assert.equal(r.status, 0, r.stderr)
+  assert.deepEqual(JSON.parse(r.stdout.trim()), { hits: 2, out: ['TimeoutError', 'TimeoutError', 'blocked'] })
+  const rows = readJsonl(file)
+  assert.deepEqual(rows.map((x) => x.result), ['sent', 'error', 'sent', 'error', 'blocked_budget_exhausted'], 'ogni invio registrato prima dell esito')
+  assert.deepEqual(rows.filter((x) => x.class).map((x) => x.class), ['timeout', 'timeout'])
+  assert.match(r.stderr, /\[ai-budget\] attivo: max 2 tentativi verso 127\.0\.0\.1, gia inviati 0/)
+})
+
+await step('ai-budget + client AI originale: errori di rete, limite esaurito durante un retry -> nessun invio oltre il limite', () => {
+  const file = path.join(tmp, 'budget-client-net.jsonl')
+  const hitsFile = path.join(tmp, 'budget-client-net.hits')
+  const r = spawnSync(process.execPath, [...tsx, 'pilot/test/budget-client.mts', '2'], {
+    cwd: backendDir, encoding: 'utf8',
+    env: { ...process.env, AI_BUDGET_HOST: '127.0.0.1', AI_BUDGET_MAX: '2', AI_BUDGET_FILE: file, NODE_OPTIONS: `--import ${budget}`, LOG_LEVEL: 'error', TEST_SERVER_MODE: 'destroy', TEST_HITS: hitsFile },
+  })
+  assert.equal(r.status, 0, r.stderr.slice(-400))
+  assert.equal(fs.readFileSync(hitsFile, 'utf8'), '2', 'il server ha ricevuto solo 2 richieste')
+  const rows = readJsonl(file)
+  assert.equal(rows.filter((x) => x.result === 'sent').length, 2)
+  assert.equal(rows.filter((x) => x.class === 'network').length, 2)
+  assert.equal(rows.filter((x) => x.result === 'blocked_budget_exhausted').length, 4, 'ciclo 1: terzo tentativo bloccato; ciclo 2: tre bloccati')
+  assert.deepEqual(JSON.parse(r.stdout.trim().split('\n').at(-1)).decisions, [null, null])
+})
+
+if (process.env.ALPHA_SELFTEST_SLOW === '1') {
+  await step('ai-budget + client AI originale: timeout reale di 30 s, limite esaurito durante il retry (lento)', () => {
+    const file = path.join(tmp, 'budget-client-hang.jsonl')
+    const hitsFile = path.join(tmp, 'budget-client-hang.hits')
+    const r = spawnSync(process.execPath, [...tsx, 'pilot/test/budget-client.mts', '1'], {
+      cwd: backendDir, encoding: 'utf8', timeout: 150_000,
+      env: { ...process.env, AI_BUDGET_HOST: '127.0.0.1', AI_BUDGET_MAX: '2', AI_BUDGET_FILE: file, NODE_OPTIONS: `--import ${budget}`, LOG_LEVEL: 'error', TEST_SERVER_MODE: 'hang', TEST_HITS: hitsFile },
+    })
+    assert.equal(r.status, 0, r.stderr.slice(-400))
+    assert.equal(fs.readFileSync(hitsFile, 'utf8'), '2')
+    const rows = readJsonl(file)
+    assert.deepEqual(rows.filter((x) => x.class).map((x) => x.class), ['timeout', 'timeout'])
+    assert.equal(rows.filter((x) => x.result === 'blocked_budget_exhausted').length, 1)
+    assert.deepEqual(JSON.parse(r.stdout.trim().split('\n').at(-1)).decisions, [null])
+  })
+}
+
+await step('ai-budget: riavvio con lo stesso registro, doppio caricamento, registro non scrivibile', () => {
+  const run = (env, imports = 1, calls = 3) => spawnSync(process.execPath, [...Array(imports).fill(['--import', budget]).flat(), '--input-type=module', '-e', `
+    import http from 'node:http'
+    let hits = 0
+    const srv = http.createServer((q, r) => { hits++; r.writeHead(200); r.end('{}') }).listen(0, '127.0.0.1')
+    await new Promise((r) => srv.once('listening', r))
+    const url = 'http://127.0.0.1:' + srv.address().port + '/x'
+    const out = []
+    for (let i = 0; i < ${calls}; i++) { try { out.push((await fetch(url)).status) } catch (e) { out.push(e.message.includes('not writable') ? 'not_writable' : 'blocked') } }
+    srv.closeAllConnections(); srv.close()
+    console.log(JSON.stringify({ hits, out }))`], { encoding: 'utf8', env: { ...process.env, AI_BUDGET_HOST: '127.0.0.1', ...env } })
+  // riavvio: 2 tentativi gia inviati nel registro, limite 3 -> uno solo
+  const file = path.join(tmp, 'budget-restart.jsonl')
+  fs.writeFileSync(file, [1, 2].map((n) => JSON.stringify({ ts: 'x', pid: 1, attempt: n, path: '/x', result: 'sent' })).join('\n') + '\n')
+  const a = run({ AI_BUDGET_MAX: '3', AI_BUDGET_FILE: file })
+  assert.deepEqual(JSON.parse(a.stdout.trim()), { hits: 1, out: [200, 'blocked', 'blocked'] })
+  assert.match(a.stderr, /gia inviati 2/)
+  // caricato due volte: un solo contatore, una sola riga di avvio
+  const file2 = path.join(tmp, 'budget-double.jsonl')
+  const b = run({ AI_BUDGET_MAX: '5', AI_BUDGET_FILE: file2 }, 2)
+  assert.deepEqual(JSON.parse(b.stdout.trim()), { hits: 3, out: [200, 200, 200] })
+  assert.equal(readJsonl(file2).filter((x) => x.result === 'sent').length, 3)
+  assert.equal((b.stderr.match(/\[ai-budget\] attivo/g) ?? []).length, 1)
+  // registro non scrivibile (una cartella): nessun invio
+  const c = run({ AI_BUDGET_MAX: '5', AI_BUDGET_FILE: tmp })
+  assert.deepEqual(JSON.parse(c.stdout.trim()), { hits: 0, out: ['not_writable', 'not_writable', 'not_writable'] })
+  // limite non valido: preload non attivo, riga che il launcher rifiuta
+  const d = run({ AI_BUDGET_MAX: '12.5', AI_BUDGET_FILE: path.join(tmp, 'budget-bad.jsonl') }, 1, 0)
+  assert.match(d.stderr, /\[ai-budget\] NON attivo/)
+})
+
+await step('check-run: con il registro valgono i tentativi inviati, non la stima dal log (il caso 13/12 del pilota)', () => {
+  // 11 richieste, 2 timeout ripetuti (2 righe di retry): stima 13 > 12, ma solo 12 inviati e nessuno bloccato
+  const extra = ['2026-10-25T11:00:01.000Z WARNING services.aiDecision: AI API request failed (attempt 1/3), retrying in 1.2s: TimeoutError',
+    '2026-10-25T11:05:31.000Z WARNING services.aiDecision: AI API request failed (attempt 1/3), retrying in 1.1s: TimeoutError']
+  const trace = Array.from({ length: 11 }, (_, i) => JSON.stringify({ ts: new Date(Date.UTC(2026, 9, 25, 10, 5 * (i + 1))).toISOString(), event: 'request', model: 'm' })).join('\n')
+  const sent = (n) => Array.from({ length: n }, (_, i) => JSON.stringify({ attempt: i + 1, result: 'sent' })).join('\n')
+  const ok = evaluateRun({ logText: logOf(11, extra), traceText: trace, attemptsText: sent(12), maxAttempts: 12 })
+  assert.equal(ok.trace.http_attempts_estimate, 13)
+  assert.deepEqual([ok.attempts.sent, ok.attempts.blocked_budget, ok.stop], [12, 0, []])
+  const blocked = evaluateRun({ logText: logOf(11, extra), traceText: trace, attemptsText: sent(12) + '\n' + JSON.stringify({ attempt: null, result: 'blocked_budget_exhausted', max: 12 }), maxAttempts: 12 })
+  assert.deepEqual(blocked.stop, ['limite tentativi AI raggiunto: 12/12 inviati, 1 bloccati senza invio'])
+  // senza registro (CLI su prove vecchie) resta il controllo a posteriori con la stima
+  assert.ok(evaluateRun({ logText: logOf(11, extra), traceText: trace, maxAttempts: 12 }).stop.includes('limite tentativi superato: 13/12'))
+})
+
 await step('check-run: retry AI distinti dai cicli, errori Hyperliquid non contati come tentativi AI, nessun falso allarme dalle notizie', () => {
   const extra = [
     '2026-10-25T11:00:01.000Z WARNING services.aiDecision: AI API rate limited (attempt 1/3), waiting 1.4s...',
@@ -653,6 +756,62 @@ await step('replay delle uscite C1/C2/C3: sola lettura, risultato ipotetico con 
   assert.match(t.stdout, /Replay uscite C1\/C2\/C3 \(IPOTETICO\)/)
   assert.equal(node(['--import', 'tsx', path.join(pilotDir, 'replay-exits.mjs'), run, '--modes', 'C9']).status, 64)
   assert.equal(sha(path.join(run, 'pilot.db')), before, 'il replay ha modificato il database')
+})
+
+await step('launcher: limite preventivo nell app, raffica di tentativi tra due controlli -> nessun invio oltre --max-attempts; arresto, controllo e chiave rimossa', async () => {
+  const { spawn } = await import('node:child_process')
+  const dir = path.join(tmp, 'budget-burst')
+  const fakeKey = 'fake-' + 'b'.repeat(24)
+  const seen = []
+  const ai = (await import('node:http')).createServer((q, r) => { seen.push({ at: Date.now(), auth: q.headers.authorization }); r.writeHead(429); r.end('{}') }).listen(0, '127.0.0.1')
+  await new Promise((r) => ai.once('listening', r))
+  const base = `http://127.0.0.1:${ai.address().port}/v1beta/openai`
+  const pollMs = 3000
+  const p = spawn(process.execPath, [path.join(pilotDir, 'run-pilot.mjs'), '--run-dir', dir, '--authorized', '--test-backend', path.join(here, 'fake-backend.mjs'),
+    '--poll-ms', String(pollMs), '--port', '5802', '--proxy-shim', 'off', '--startup-ms', '10000', '--max-attempts', '5', '--base-url', base,
+    '--key-mode', 'env', '--key-env', 'FAKE_TEST_KEY'], {
+    cwd: backendDir, env: { ...process.env, FAKE_SCENARIO: 'ai_burst', FAKE_CYCLES: '4', FAKE_CYCLE_MS: '150', FAKE_TEST_KEY: fakeKey, ALPHA_PILOT_KEY_INSECURE_TEST: '1' },
+  })
+  let stdout = ''
+  p.stdout.on('data', (d) => (stdout += d))
+  const code = await new Promise((r) => p.on('exit', r))
+  ai.closeAllConnections(); ai.close()
+  assert.equal(code, 2, stdout)
+  const meta = JSON.parse(fs.readFileSync(path.join(dir, 'run-meta.json'), 'utf8'))
+  assert.deepEqual(meta.plan.ai_budget, { max_attempts: 5, host: '127.0.0.1', log: path.join(dir, 'ai-attempts.jsonl') })
+  assert.equal(seen.length, 5, 'il server AI ha ricevuto esattamente --max-attempts richieste')
+  assert.ok(seen.every((x) => x.auth === 'Bea' + 'rer ' + fakeKey), 'key-inject attivo sotto il limite')
+  const rows = readJsonl(path.join(dir, 'ai-attempts.jsonl'))
+  assert.equal(rows.filter((x) => x.result === 'sent').length, 5)
+  assert.equal(rows.filter((x) => x.result === 'blocked_budget_exhausted').length, 7, '4 cicli x 3 tentativi = 12: 7 rifiutati senza invio')
+  const times = rows.map((x) => Date.parse(x.ts))
+  assert.ok(Math.max(...times) - Math.min(...times) < pollMs, 'tutti i tentativi nello stesso intervallo tra due controlli del launcher')
+  assert.equal(meta.status, 'stopped')
+  assert.ok(meta.reasons.includes('limite tentativi AI raggiunto: 5/5 inviati, 7 bloccati senza invio'), meta.reasons.join('; '))
+  assert.equal(meta.key_scrubbed, true)
+  const check = JSON.parse(fs.readFileSync(path.join(dir, 'check.json'), 'utf8'))
+  assert.deepEqual([check.attempts.sent, check.attempts.blocked_budget, check.attempts.max], [5, 7, 5])
+  const out = JSON.parse(stdout.slice(stdout.indexOf('{')))
+  assert.deepEqual([out.attempts, out.attempts_blocked], [5, 7])
+  for (const f of fs.readdirSync(dir)) assert.ok(!fs.readFileSync(path.join(dir, f)).includes(fakeKey), `chiave in ${f}`)
+})
+
+await step('launcher: senza la conferma del limite preventivo nell app nessun conto e nessuna chiamata', () => {
+  // un preload caricato prima (da NODE_OPTIONS ereditato) occupa il segnaposto del limite: ai-budget non si attiva e
+  // non scrive la riga "attivo"; il launcher deve fermarsi prima di creare il conto
+  const dir = path.join(tmp, 'budget-missing')
+  const claim = path.join(tmp, 'claim-budget.mjs')
+  fs.writeFileSync(claim, "globalThis[Symbol.for('alpha-bot.ai-budget')] = true\n")
+  const r = node([path.join(pilotDir, 'run-pilot.mjs'), '--run-dir', dir, ...fakeArgs(5803), '--max-attempts', '7'],
+    { FAKE_SCENARIO: 'complete', NODE_OPTIONS: `--import ${pathToFileURL(claim).href}` })
+  assert.equal(r.status, 2, r.stdout + r.stderr)
+  const m = JSON.parse(fs.readFileSync(path.join(dir, 'run-meta.json'), 'utf8'))
+  assert.equal(m.status, 'aborted_before_ai')
+  assert.ok(m.reasons.some((x) => x.startsWith('limite preventivo dei tentativi AI non attivo')), m.reasons.join('; '))
+  assert.equal(fs.existsSync(path.join(dir, 'fake-post-received')), false)
+  for (const bad of [['--max-attempts', '0'], ['--max-attempts', '2.5'], ['--max-attempts', 'x']]) {
+    assert.equal(runPilot(path.join(tmp, 'no-auth'), 'complete', bad).status, 64, bad.join(' '))
+  }
 })
 
 await step('launcher: cartella non vuota rifiutata', () => {

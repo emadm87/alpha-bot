@@ -124,21 +124,22 @@ modello. Fuori dal launcher lo stesso valore si può dare con la variabile `ALPH
 quando la richiesta di creazione non indica `cost_model`). I conti dei database precedenti restano
 `original`.
 
-**Limite rigido dei tentativi verso Gemini (`ai-budget.mjs`).** `--max-attempts` è solo un controllo a
-posteriori. Il limite garantito si ottiene caricando il preload, che rifiuta senza inviarla ogni richiesta
-oltre `AI_BUDGET_MAX`, retry compresi (vale per il processo dell'app; il launcher non lo riavvia):
+**Limite rigido dei tentativi verso l'AI (`ai-budget.mjs`, automatico dal 007G).** Il launcher carica sempre il
+preload nel processo dell'app con `--max-attempts` (default 12), l'host di `--base-url` e il registro
+`<cartella>/ai-attempts.jsonl`; non serve impostare `NODE_OPTIONS` o `AI_BUDGET_*`.
 
-```bash
-AI_BUDGET_MAX=300 AI_BUDGET_FILE="$PWD/pilot/runs/<cartella>/ai-attempts.jsonl" \
-NODE_OPTIONS="--import file://$PWD/pilot/ai-budget.mjs" node pilot/run-pilot.mjs --authorized ...
-```
-```powershell
-$env:AI_BUDGET_MAX = "300"
-$env:AI_BUDGET_FILE = "$PWD\pilot\runs\<cartella>\ai-attempts.jsonl"
-$env:NODE_OPTIONS = "--import " + ([System.Uri](Resolve-Path pilot\ai-budget.mjs).Path).AbsoluteUri
-node pilot/run-pilot.mjs --authorized ...
-```
-Il file viene creato alla prima chiamata, quindi può stare nella cartella della prova. Dopo il ciclo 1 il file `ai-attempts.jsonl` deve esistere: se manca, il preload non è attivo e va fermata la prova.
+- Ogni tentativo HTTP verso l'host AI, retry automatici del client e tentativi finiti in timeout compresi, viene
+  scritto nel registro e contato PRIMA dell'invio; oltre il limite la richiesta viene rifiutata senza partire
+  (il client la tratta come un errore: ciclo senza decisione). Se il registro non si puo scrivere, la richiesta
+  non parte.
+- Il limite vale dentro l'app, non dipende dai controlli del launcher (ogni `--poll-ms`, 15 s): nemmeno una raffica
+  di tentativi tra due controlli lo supera.
+- Il launcher non crea il conto se nel log dell'app manca la riga
+  `[ai-budget] attivo: max <N> tentativi verso <host>, gia inviati 0`; al primo tentativo rifiutato si ferma
+  ("limite tentativi AI raggiunto"), con controllo, report e rimozione della chiave come negli altri arresti.
+- Il conteggio usato e quello del registro (tentativi inviati); la stima dal log (richieste + righe di retry,
+  che conta anche i retry rifiutati) resta solo informativa in `check.json`.
+- Dopo una risposta 401/403/404 nessun altro tentativo viene inviato.
 
 Il launcher:
 
@@ -219,7 +220,7 @@ node pilot/check-run.mjs pilot/runs/<cartella>/backend.log pilot/runs/<cartella>
 Automatico quando si verifica una di queste condizioni:
 
 - completati i cicli previsti (eventi `outcome` nella traccia);
-- tentativi HTTP verso l'AI oltre `--max-attempts` (l'app ripete fino a 3 tentativi per ciclo);
+- primo tentativo AI rifiutato dal limite preventivo `--max-attempts` (retry e timeout compresi; nessun tentativo oltre il limite viene inviato);
 - 3 cicli consecutivi senza decisione o con esecuzione fallita;
 - errore 401/403/404, chiamate duplicate (meno di 240 s), chiave nel log o nella traccia;
 - reset dello scheduler fallito, ordini manuali, nessuna chiamata AI entro 6 minuti dalla creazione del conto;
