@@ -294,6 +294,39 @@ export const CRYPTO_COMMISSION_RATE = 0.001
 export const CRYPTO_MIN_ORDER_QUANTITY = 0.0001
 export const CRYPTO_LOT_SIZE = 0.0001
 
+/**
+ * C1 automatic exits (Task 009D, function 3): one row per perpetual position of
+ * an AI account, from the plan made at the first check after the opening (stop
+ * at 2 ATR from the entry, trailing exit at 3 ATR from the best price seen) to
+ * the close it executed, or the note that the position was closed otherwise.
+ */
+export const c1Exits = sqliteTable('c1_exits', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  accountId: integer('account_id').notNull(),
+  symbol: text('symbol').notNull(),
+  side: text('side').notNull(),
+  /** ms since epoch: first fill of the position (identifies it) */
+  openedAt: integer('opened_at').notNull(),
+  entryPrice: real('entry_price').notNull(),
+  /** ATR(14) of the 1 h bars closed before the opening; null while not available */
+  atr: real('atr'),
+  atrBars: integer('atr_bars'),
+  stopPrice: real('stop_price'),
+  trailDistance: real('trail_distance'),
+  bestPrice: real('best_price'),
+  exitLevel: real('exit_level'),
+  /** waiting_atr | active | closing | closed | closed_elsewhere */
+  status: text('status').notNull(),
+  lastError: text('last_error'),
+  createdAt: integer('created_at').notNull(),
+  updatedAt: integer('updated_at').notNull(),
+  closedAt: integer('closed_at'),
+  closePrice: real('close_price'),
+  closeQuantity: real('close_quantity'),
+  closeReason: text('close_reason'),
+  orderId: integer('order_id'),
+})
+
 /** Leverage trading constants (Hyperliquid-style) */
 export const CRYPTO_TAKER_FEE_RATE = 0.0007
 export const CRYPTO_INTEREST_RATE_HOURLY = 0.0000125

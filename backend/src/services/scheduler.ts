@@ -137,7 +137,13 @@ export class TaskScheduler {
     this.schedule(
       jobId,
       intervalSeconds,
-      () => this.checkMarginLevels(),
+      async () => {
+        await this.checkMarginLevels()
+        // 009D (function 3): C1 exits in the same tick, after the original margin check; closes wait while an AI cycle runs
+        const { runC1Pass } = await import('./c1Exits.js')
+        const { AI_TRADE_JOB_ID } = await import('./tradingCommands.js')
+        await runC1Pass(() => this.getJob(AI_TRADE_JOB_ID)?.inFlight === true)
+      },
       'checkMarginLevels',
     )
     logger.info(

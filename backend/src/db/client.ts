@@ -232,6 +232,31 @@ CREATE TABLE IF NOT EXISTS ai_decision_logs (
 );
 CREATE INDEX IF NOT EXISTS ix_ai_decision_logs_id ON ai_decision_logs (id);
 CREATE INDEX IF NOT EXISTS ix_ai_decision_logs_decision_time ON ai_decision_logs (decision_time);
+CREATE TABLE IF NOT EXISTS c1_exits (
+	id INTEGER NOT NULL,
+	account_id INTEGER NOT NULL,
+	symbol VARCHAR(20) NOT NULL,
+	side VARCHAR(5) NOT NULL,
+	opened_at INTEGER NOT NULL,
+	entry_price FLOAT NOT NULL,
+	atr FLOAT,
+	atr_bars INTEGER,
+	stop_price FLOAT,
+	trail_distance FLOAT,
+	best_price FLOAT,
+	exit_level FLOAT,
+	status VARCHAR(20) NOT NULL,
+	last_error TEXT,
+	created_at INTEGER NOT NULL,
+	updated_at INTEGER NOT NULL,
+	closed_at INTEGER,
+	close_price FLOAT,
+	close_quantity FLOAT,
+	close_reason TEXT,
+	order_id INTEGER,
+	PRIMARY KEY (id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_c1_exits_position ON c1_exits (account_id, symbol, opened_at);
 `)
 
   // Posted margin per position, added after the original schema: databases
