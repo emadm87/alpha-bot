@@ -7,12 +7,16 @@ import { db } from '../db/client.js'
 import {
   accounts,
   aiDecisionLogs,
+  CRYPTO_INTEREST_RATE_HOURLY,
+  CRYPTO_TAKER_FEE_RATE,
   positions as positionsTable,
   type Account,
 } from '../db/schema.js'
 import { calcAccountEquity } from './assetCalculator.js'
 import { recordAICycle } from './aiDiagnostics.js'
 import { fetchLatestNews } from './newsFeed.js'
+import { getLastPrice } from './marketData.js'
+import { MEMORY_LIMITS, positionMemory, positionState, type PositionMemory, type PositionState } from './positionState.js'
 import { getLogger } from '../utils/logger.js'
 
 const logger = getLogger('services.aiDecision')
@@ -33,19 +37,16 @@ export const SUPPORTED_SYMBOLS: Record<string, string> = {
   BNB: 'Binance Coin',
 }
 
-export interface PortfolioPosition {
-  quantity: number
-  avg_cost: number
-  current_value: number
-  side: string
-  leverage: number
-}
+/** 009D (function 1): the real state of the position (positionState.ts) instead of the value at entry. */
+export type PortfolioPosition = PositionState
 
 export interface Portfolio {
   cash: number
   frozen_cash: number
   positions: Record<string, PortfolioPosition>
   total_assets: number
+  /** 009D (function 2): per open position, the reason that opened it and the last decisions. */
+  memory?: Record<string, PositionMemory>
 }
 
 export interface AIDecision {
@@ -77,15 +78,21 @@ export async function getPortfolioData(account: Account): Promise<Portfolio> {
     .all()
 
   const portfolio: Record<string, PortfolioPosition> = {}
+  const memory: Record<string, PositionMemory> = {}
+  const now = Date.now()
   for (const pos of rows) {
     if (pos.quantity > 0) {
-      portfolio[pos.symbol] = {
-        quantity: pos.quantity,
-        avg_cost: pos.avgCost,
-        current_value: pos.quantity * pos.avgCost,
-        side: (pos.side ?? 'LONG').toUpperCase(),
-        leverage: pos.leverage,
+      // the same price source as the market prices of the prompt (cached at most 30 s)
+      let price: number | null = null
+      let issue: string | undefined
+      try {
+        price = await getLastPrice(pos.symbol, 'CRYPTO')
+      } catch (e) {
+        issue = `price unavailable: ${e}`
       }
+      const state = positionState(account.id, pos, price, now, issue)
+      portfolio[pos.symbol] = state
+      if (state.opened_at) memory[pos.symbol] = positionMemory(account.id, pos.symbol, Date.parse(state.opened_at), now)
     }
   }
 
@@ -94,6 +101,7 @@ export async function getPortfolioData(account: Account): Promise<Portfolio> {
     frozen_cash: account.frozenCash,
     positions: portfolio,
     total_assets: (await calcAccountEquity(account)).equity,
+    memory,
   }
 }
 
@@ -108,8 +116,11 @@ Portfolio Data:
 - Cash Available: $${portfolio.cash.toFixed(2)}
 - Frozen Cash: $${portfolio.frozen_cash.toFixed(2)}
 - Total Assets: $${portfolio.total_assets.toFixed(2)}
-- Current Positions (each shows quantity, avg_cost, current_value, side: LONG/SHORT, leverage):
+- Current Positions (each shows side: LONG/SHORT, quantity, leverage, avg_cost (entry price), current_price, entry_value, current_value (quantity x current_price), unrealized_pnl, realized_pnl_partial_closes, fees_paid (so far), estimated_exit_fee, interest_charged and interest_accrued (on the borrowed part), estimated_net_pnl_if_closed_now (P&L minus fees, exit fee and interest), estimated_exit_spread_usdc, opened_at, holding_minutes):
 ${JSON.stringify(portfolio.positions, null, 2)}
+- Position memory (per open position: the reason you gave when opening it, the decisions since and the last ${MEMORY_LIMITS.recentDecisions} with their reasons; context, not evidence: judge with the current data):
+${JSON.stringify(portfolio.memory ?? {}, null, 2)}
+- Trading costs in this paper engine: taker fee ${Number((CRYPTO_TAKER_FEE_RATE * 100).toPrecision(6))}% of the notional on each side (open and close); interest ${Number((CRYPTO_INTEREST_RATE_HOURLY * 100).toPrecision(6))}% per hour on the borrowed part of a leveraged position; no funding; orders fill at the last price, so no spread is charged here (estimated_exit_spread_usdc: what a real exit would pay, from Hyperliquid impact prices, null if not available). A round trip costs at least twice the fee.
 
 Current Market Prices:
 ${JSON.stringify(prices, null, 2)}
@@ -144,6 +155,7 @@ Rules:
 - IMPORTANT: You can only hold ONE position per coin at a time (either long OR short, not both)
 - Before opening a new position, check Current Positions to see if you already have a position on that coin
 - You can only close positions that you currently hold (check Current Positions for side: "LONG" or "SHORT")
+- Each cycle, review every open position with its current data and memory: hold it while your reasons still apply, close it when they no longer do or when the expected gain no longer covers the costs and the risk; both are allowed, neither is required
 - leverage is typically 1-10x; only use high leverage (>5x) if you're very confident
 - Only choose symbols you have price data for`
 }
@@ -388,7 +400,7 @@ export function saveAIDecision(
     if ((operation === 'close' || operation === 'hold') && symbol) {
       const pos = portfolio.positions[symbol]
       if (pos && portfolio.total_assets > 0) {
-        prevPortion = pos.current_value / portfolio.total_assets
+        prevPortion = pos.entry_value / portfolio.total_assets // the value at entry, as the original current_value
       }
     }
 
