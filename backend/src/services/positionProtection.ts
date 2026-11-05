@@ -558,6 +558,8 @@ export function describeExperiment(env: Record<string, string | undefined> = pro
   const cfg = loadExitConfig(env)
   const info = positionInfoVersion(env)
   const prompt = promptVersion(env)
+  // the hybrid prompt shows the state of each position: it is built on the corrected position view (007A v2)
+  if (prompt === 'hybrid' && info !== 'v2') throw new Error('ALPHA_PROMPT=hybrid needs ALPHA_POSITION_INFO=v2 (the position state it shows)')
   return `Experiment config: position_info=${info} protection=${cfg.mode} prompt=${prompt}${cfg.mode !== 'off' ? ` config=${JSON.stringify(cfg)}` : ''}`
 }
 

@@ -199,6 +199,28 @@ Usa le candele 15 m di `research/exit-rules/data` (SHA-256 verificati; coprono f
 book non registrato; decisioni di Gemini dopo un'uscita ipotetica non simulabili) sono nel campo `limits`.
 La ricerca riproducibile su C1/C2/C3 è in `research/exit-rules/README.md`.
 
+## 3c. Versione ibrida (branch `claude/exp-009d-hybrid-v1`, Task 009D)
+
+Opzioni: `--prompt hybrid --position-info v2 --protection C1 --cost-model hyperliquid`. Senza queste opzioni l'app resta
+quella originale (prompt v1). L'app rifiuta l'avvio con `--prompt hybrid` senza `--position-info v2`.
+
+| Parte | Cosa cambia | Da dove |
+|---|---|---|
+| Informazioni | per ogni posizione: prezzo d'ingresso e attuale, P&L, commissioni, funding, netto se chiusa ora, durata, piano di uscita | 007A (`ALPHA_POSITION_INFO=v2`) |
+| Prompt | il prompt originale invariato per gli ingressi (prezzi, notizie, formato, regole), piu: memoria delle posizioni, costi, revisione esplicita di ogni posizione (HOLD o CLOSE, nessuno obbligatorio), campi facoltativi `invalidation` e `position_review` | 009D, `src/services/promptHybrid.ts` |
+| Memoria | per posizione: decisione d'apertura (motivo, invalidazione dichiarata, dati di quel momento), conteggio e ultime 3 decisioni; nel database (`ai_decisions_v3`), limitata | 009D, `src/services/hybridContext.ts` |
+| Uscite | C1: stop a 2 ATR fissato all'ingresso, uscita trailing a 3 ATR, emergenza al 3 % del conto, cooldown 2 h; nel monitor ogni 5 s, indipendente da Gemini | 007C |
+| Costi | commissione Hyperliquid 0,045 % per lato, esecuzione sul book (spread e profondita), funding orario; costi pagati mostrati a Gemini | 006I, 009D |
+| Errori Gemini | 500/502/503/504 ripetuti come i 429 (massimo 3 tentativi per ciclo), sempre dentro il limite rigido di `--max-attempts` | 009D, solo `hybrid` |
+
+Sizing e leva come nell'originale (`cash x target_portion_of_balance`, leva scelta da Gemini). Dopo la prova:
+`node pilot/hybrid-summary.mjs <cartella>`. Mostra:
+- decisioni per operazione ed esito;
+- uso della memoria: revisioni date con posizioni aperte, invalidazioni dichiarate;
+- chiusure di Gemini e del modulo;
+- netto, drawdown e peso delle commissioni;
+- tentativi API.
+
 ## 4. Controllo dello scheduler
 
 L'unica prova valida è la riga dello scheduler:

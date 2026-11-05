@@ -230,7 +230,16 @@ test('no secret is written: API key and authorization header never appear', asyn
   assert.ok(!text.includes('SECRET-0123'), 'part of the API key')
   assert.ok(!/authorization/i.test(text), 'authorization header')
   assert.ok(text.includes('[REDACTED]'), 'the echoed key was redacted')
-  assert.equal(fs.statSync(file).mode & 0o777, 0o600)
+  if (process.platform === 'win32') {
+    // 009B-FIX: on Windows POSIX modes do not exist (Node reports 0o666 whatever chmod 0o600 asked); the real
+    // protection is the NTFS ACL inherited from the folder: no access at all for broad groups (checked by SID)
+    const acl: any = await import(new URL('../../pilot/acl-check.mjs', import.meta.url).href)
+    const aces = acl.windowsAcl(file)
+    assert.ok(aces.length > 0, 'ACL read')
+    assert.deepEqual(acl.broadAccess(aces), [], JSON.stringify(aces))
+  } else {
+    assert.equal(fs.statSync(file).mode & 0o777, 0o600)
+  }
 })
 
 test('a failing recorder does not stop trading', async () => {

@@ -11,20 +11,25 @@
 import type { ExitConfig } from './exitRules.js'
 import type { V3Context } from './v3Context.js'
 
-export type PromptVersion = 'v1' | 'v3'
+export type PromptVersion = 'v1' | 'v3' | 'hybrid'
 
-/** ALPHA_PROMPT: v1 (default, the original prompt) or v3; anything else is refused at startup. */
+/**
+ * ALPHA_PROMPT: v1 (default, the original prompt), v3, or hybrid (Task 009D:
+ * the original prompt plus position state, memory and costs, promptHybrid.ts);
+ * anything else is refused at startup.
+ */
 export function promptVersion(env: Record<string, string | undefined> = process.env): PromptVersion {
   const raw = (env.ALPHA_PROMPT ?? 'v1').trim().toLowerCase()
   if (raw === '' || raw === 'v1') return 'v1'
   if (raw === 'v3') return 'v3'
-  throw new Error(`ALPHA_PROMPT must be v1 or v3, got ${env.ALPHA_PROMPT}`)
+  if (raw === 'hybrid') return 'hybrid'
+  throw new Error(`ALPHA_PROMPT must be v1 or v3 (or hybrid), got ${env.ALPHA_PROMPT}`)
 }
 
 /** Same generation settings as the original prompt. */
 export const V3_GENERATION = { temperature: 0.7, max_tokens: 1000 } as const
 
-function exitModuleText(cfg: ExitConfig): string {
+export function exitModuleText(cfg: ExitConfig): string {
   if (cfg.mode === 'off') return 'OFF. No automatic exit: a position stays open until you close it (account-level margin and liquidation checks of the engine still apply).'
   const common = `Stop at ${cfg.stopAtr} ATR(14, 1h) from the entry, fixed at the entry; an account emergency exit at a loss of ${cfg.emergencyLossPctOfEquity * 100}% of the account; after a protective exit, no reopening of the same coin in the same direction for ${cfg.cooldownMs / 3_600_000} h.`
   const rule = cfg.mode === 'C1' ? `${cfg.trailAtr} ATR trailing exit (chandelier) from the best price since entry.`

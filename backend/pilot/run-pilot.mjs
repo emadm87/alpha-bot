@@ -97,7 +97,7 @@ if (!['original', 'hyperliquid'].includes(cfg.costModel)) fail(64, `--cost-model
 if (!['on', 'off'].includes(cfg.guard)) fail(64, `--guard non valido: ${cfg.guard}`)
 if (!['v1', 'v2'].includes(cfg.positionInfo)) fail(64, `--position-info non valido: ${cfg.positionInfo}`)
 if (!['off', 'C1', 'C2', 'C3'].includes(cfg.protection)) fail(64, `--protection non valido: ${cfg.protection} (off, C1, C2 o C3)`)
-if (!['v1', 'v3'].includes(cfg.prompt)) fail(64, `--prompt non valido: ${cfg.prompt} (v1 o v3)`)
+if (!['v1', 'v3', 'hybrid'].includes(cfg.prompt)) fail(64, `--prompt non valido: ${cfg.prompt} (v1, v3 o hybrid)`)
 if (!Number.isInteger(cfg.maxAttempts) || cfg.maxAttempts < 1) fail(64, `--max-attempts non valido: ${flag('--max-attempts')} (intero >= 1)`)
 let aiHost
 try {

@@ -15,7 +15,9 @@ import { recordAICycle } from './aiDiagnostics.js'
 import { fetchLatestNews } from './newsFeed.js'
 import { calculatePositionInterest } from './orderExecutorLeverage.js'
 import { activeCooldowns, buildPositionView, currentPriceFor } from './positionProtection.js'
-import { positionInfoVersion } from './exitRules.js'
+import { loadExitConfig, positionInfoVersion } from './exitRules.js'
+import { buildPromptHybrid } from './promptHybrid.js'
+import { accountCosts, hybridNotes, hybridPositions, recordHybridDecision } from './hybridContext.js'
 import { buildMessagesV3, estimateTokens, promptVersion, V3_GENERATION } from './promptV3.js'
 import { markDecisionV3Outcome, parseV3, recordDecisionV3, validateDecisionV3 } from './aiDecisionV3.js'
 import { buildV3Context, type V3Context } from './v3Context.js'
@@ -261,7 +263,11 @@ export async function callAIForDecision(
   try {
     // Task 007F: ALPHA_PROMPT=v3 builds the v3 context and messages; otherwise
     // (the default) the original prompt below, unchanged.
-    const v3 = promptVersion() === 'v3'
+    const version = promptVersion()
+    const v3 = version === 'v3'
+    // Task 009D: ALPHA_PROMPT=hybrid = the original prompt plus position state, memory and costs (promptHybrid.ts)
+    const hybrid = version === 'hybrid'
+    const hybridAt = Date.now()
     let v3ctx: V3Context | null = null
     let payload: { model: string | null; messages: { role: string; content: string }[]; temperature: number; max_tokens: number }
     if (v3) {
@@ -271,7 +277,11 @@ export async function callAIForDecision(
     } else {
     const newsSummary = await fetchLatestNews()
     const newsSection = newsSummary || 'No recent CoinJournal news available.'
-    const prompt = buildPrompt(portfolio, prices, newsSection)
+    const prompt = hybrid
+      ? buildPromptHybrid(buildPrompt(portfolio, prices, newsSection), {
+          positions: hybridPositions(account, hybridAt), costs: accountCosts(account, hybridAt), exitModule: loadExitConfig(),
+        })
+      : buildPrompt(portfolio, prices, newsSection)
 
     // Use OpenAI-compatible chat completions format
     payload = {
@@ -308,11 +318,15 @@ export async function callAIForDecision(
 
         if (response.status === 200) break
 
-        if (response.status === 429) {
+        // 009D, hybrid only: a 500/502/503/504 (model overloaded or unavailable) gets the same retries as a 429
+        const transient = hybrid && [500, 502, 503, 504].includes(response.status)
+        if (response.status === 429 || transient) {
           // Rate limited: exponential backoff with jitter
           const waitTime = 2 ** attempt + Math.random()
           logger.warning(
-            `AI API rate limited (attempt ${attempt + 1}/${maxRetries}), waiting ${waitTime.toFixed(1)}s...`,
+            transient
+              ? `AI API unavailable (HTTP ${response.status}) (attempt ${attempt + 1}/${maxRetries}), waiting ${waitTime.toFixed(1)}s...`
+              : `AI API rate limited (attempt ${attempt + 1}/${maxRetries}), waiting ${waitTime.toFixed(1)}s...`,
           )
           if (attempt < maxRetries - 1) {
             await sleep(waitTime * 1000)
@@ -320,9 +334,9 @@ export async function callAIForDecision(
           }
           const body = await response.text()
           logger.error(
-            `AI API rate limited after ${maxRetries} attempts: ${body}`,
+            `AI API ${transient ? `unavailable (HTTP ${response.status})` : 'rate limited'} after ${maxRetries} attempts: ${body}`,
           )
-          trace('api_error', { status: 429, attempts: maxRetries, body })
+          trace('api_error', { status: response.status, attempts: maxRetries, body })
           return null
         }
 
@@ -397,6 +411,17 @@ export async function callAIForDecision(
       decision = { ...(parsed.value as AIDecision), _v3: { id, rejected: validation.rejected, issues: validation.issues, numbers: validation.numbers } }
     } else {
     decision = parseDecisionText(unwrapCodeFence(textContent))
+    }
+    if (hybrid && decision && typeof decision === 'object' && !Array.isArray(decision)) {
+      // 009D: every hybrid decision is recorded with the data shown (position memory of the next cycles); the order
+      // loop adds the outcome through the same _v3 marker as v3 (never rejected here: the engine's checks decide)
+      const open = Object.keys(portfolio.positions)
+      const notes = hybridNotes(decision, open.length)
+      const id = recordHybridDecision(account.id, cycleId, hybridAt, decision, {
+        prices, total_assets: portfolio.total_assets, cash: portfolio.cash, open_positions: open, prompt_chars: payload.messages[0]!.content.length,
+      }, notes)
+      if (notes.length) logger.info(`hybrid decision of ${account.name}: ${notes.join('; ')}`)
+      decision = { ...decision, _v3: { id, rejected: false, issues: notes } }
     }
 
     if (typeof decision !== 'object' || decision === null || Array.isArray(decision)) {

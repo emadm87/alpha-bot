@@ -42,7 +42,7 @@ const sha = (f) => crypto.createHash('sha256').update(fs.readFileSync(f)).digest
 const node = (argv, env = {}) => spawnSync(process.execPath, argv, { cwd: backendDir, env: { ...process.env, ...env }, encoding: 'utf8' })
 
 await step('sintassi degli script', () => {
-  for (const f of ['check-run.mjs', 'report.mjs', 'compare.mjs', 'ccxt-proxy.mjs', 'run-pilot.mjs', 'ai-budget.mjs', 'hl-guard.mjs', 'key-inject.mjs', 'replay-exits.mjs', 'export-diagnostics.mjs', 'test/fake-backend.mjs', 'test/selftest.mjs']) {
+  for (const f of ['check-run.mjs', 'report.mjs', 'compare.mjs', 'ccxt-proxy.mjs', 'run-pilot.mjs', 'ai-budget.mjs', 'hl-guard.mjs', 'key-inject.mjs', 'replay-exits.mjs', 'export-diagnostics.mjs', 'acl-check.mjs', 'hybrid-summary.mjs', 'test/fake-backend.mjs', 'test/selftest.mjs']) {
     const r = node(['--check', path.join(pilotDir, f)])
     assert.equal(r.status, 0, `${f}: ${r.stderr}`)
   }
@@ -406,6 +406,20 @@ await step('launcher: errore 403 -> arresto prima del ciclo successivo', () => {
   assert.equal(trace.length, 1, `${trace.length} richieste prima dell'arresto`)
 })
 
+await step('acl-check: gruppi ampi riconosciuti dal SID; su Windows i file della prova non sono accessibili a Everyone, Users, Authenticated Users', async () => {
+  const acl = await import(pathToFileURL(path.join(pilotDir, 'acl-check.mjs')).href)
+  const sample = [{ sid: 'S-1-5-18', type: 'Allow', rights: 'FullControl' }, { sid: 'S-1-5-32-545', type: 'Allow', rights: 'ReadAndExecute, Synchronize' },
+    { sid: 'S-1-1-0', type: 'Deny', rights: 'Read' }, { sid: 'S-1-5-11', type: 'Allow', rights: 'Modify' }]
+  assert.deepEqual(acl.broadAccess(sample).map((a) => a.group), ['Users', 'Authenticated Users'])
+  if (isWindows) {
+    for (const f of ['trace.jsonl', 'pilot.db']) {
+      const aces = acl.windowsAcl(path.join(tmp, 'complete', f))
+      assert.ok(aces.length > 0, `ACL di ${f} non letta`)
+      assert.deepEqual(acl.broadAccess(aces), [], `${f}: ${JSON.stringify(aces)}`)
+    }
+  }
+})
+
 async function startFake(dir, port, extraEnv = {}, extraArgs = []) {
   const { spawn } = await import('node:child_process')
   const p = spawn(process.execPath, [path.join(pilotDir, 'run-pilot.mjs'), '--run-dir', dir, ...fakeArgs(port), ...extraArgs], {
@@ -701,6 +715,7 @@ if (!isWindows) {
 await step('launcher: variante sperimentale nel piano (default originale), valori non validi rifiutati', () => {
   const plan = (extra) => JSON.parse(runPilot(path.join(tmp, 'no-auth'), 'complete', extra).stdout).plan
   assert.deepEqual(plan([]).experiment, { position_info: 'v1', protection: 'off', protection_config: null, prompt: 'v1' })
+  assert.equal(plan(['--prompt', 'hybrid', '--position-info', 'v2', '--protection', 'C1']).experiment.prompt, 'hybrid', '009D')
   assert.deepEqual(plan(['--position-info', 'v2', '--protection', 'c2', '--protection-config', '{"cooldownMs":3600000}', '--prompt', 'V3']).experiment,
     { position_info: 'v2', protection: 'C2', protection_config: { cooldownMs: 3600000 }, prompt: 'v3' })
   for (const bad of [['--position-info', 'v3'], ['--protection', 'on'], ['--protection', 'C4'], ['--protection-config', '{oops'], ['--protection-config', '[1]'], ['--prompt', 'v2']]) {
