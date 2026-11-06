@@ -156,6 +156,7 @@ Rules:
 - Before opening a new position, check Current Positions to see if you already have a position on that coin
 - You can only close positions that you currently hold (check Current Positions for side: "LONG" or "SHORT")
 - Each cycle, review every open position with its current data and memory: hold it while your reasons still apply, close it when they no longer do or when the expected gain no longer covers the costs and the risk; both are allowed, neither is required
+- News vs current data: news items report past events and may be old; prices, momentum or technical levels they mention are not necessarily valid now. Current Market Prices and Current Positions are the current facts and take priority: check any price or level taken from the news against them before relying on it. Re-evaluate open positions on the current data, not only on the reason given when they were opened. Open, close and hold all remain valid choices.
 - leverage is typically 1-10x; only use high leverage (>5x) if you're very confident
 - Only choose symbols you have price data for`
 }
