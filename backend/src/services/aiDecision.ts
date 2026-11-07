@@ -16,6 +16,7 @@ import { calcAccountEquity } from './assetCalculator.js'
 import { recordAICycle } from './aiDiagnostics.js'
 import { fetchLatestNews } from './newsFeed.js'
 import { getLastPrice } from './marketData.js'
+import { technicalSection } from './technicalSummary.js'
 import { MEMORY_LIMITS, positionMemory, positionState, type PositionMemory, type PositionState } from './positionState.js'
 import { getLogger } from '../utils/logger.js'
 
@@ -109,6 +110,7 @@ function buildPrompt(
   portfolio: Portfolio,
   prices: Record<string, number>,
   newsSection: string,
+  technical: string,
 ): string {
   return `You are a cryptocurrency trading AI. Based on the following portfolio and market data, decide on a trading action.
 
@@ -124,6 +126,9 @@ ${JSON.stringify(portfolio.memory ?? {}, null, 2)}
 
 Current Market Prices:
 ${JSON.stringify(prices, null, 2)}
+
+Technical Summary (Hyperliquid 1h candles, closed bars only):
+${technical}
 
 Latest Crypto News (CoinJournal):
 ${newsSection}
@@ -157,6 +162,7 @@ Rules:
 - You can only close positions that you currently hold (check Current Positions for side: "LONG" or "SHORT")
 - Each cycle, review every open position with its current data and memory: hold it while your reasons still apply, close it when they no longer do or when the expected gain no longer covers the costs and the risk; both are allowed, neither is required
 - News vs current data: news items report past events and may be old; prices, momentum or technical levels they mention are not necessarily valid now. Current Market Prices and Current Positions are the current facts and take priority: check any price or level taken from the news against them before relying on it. Re-evaluate open positions on the current data, not only on the reason given when they were opened. Open, close and hold all remain valid choices.
+- Technical data vs news: the Technical Summary and Current Market Prices are computed from current exchange data and take precedence over any interpretation of the news. Base your reason on the data given here and name the values you rely on; a null value is unknown, do not assume it. Judge each open position on the current conditions, not only on its opening thesis. Hold is a valid decision when the data support it; a loss alone does not require a close; making no trade is not an error in itself. Open (long or short), close and hold all remain available.
 - leverage is typically 1-10x; only use high leverage (>5x) if you're very confident
 - Only choose symbols you have price data for`
 }
@@ -243,9 +249,10 @@ export async function callAIForDecision(
   }
 
   try {
-    const newsSummary = await fetchLatestNews()
+    // 009F: news and the technical summary in parallel; the summary never throws and is bounded in time
+    const [newsSummary, technical] = await Promise.all([fetchLatestNews(), technicalSection(prices)])
     const newsSection = newsSummary || 'No recent CoinJournal news available.'
-    const prompt = buildPrompt(portfolio, prices, newsSection)
+    const prompt = buildPrompt(portfolio, prices, newsSection, technical)
 
     // Use OpenAI-compatible chat completions format
     const payload = {

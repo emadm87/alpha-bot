@@ -29,7 +29,7 @@ import { getLogger } from '../utils/logger.js'
 
 const logger = getLogger('services.quantData')
 
-export const QUANT_TIMEFRAMES = { '15m': 900_000, '4h': 14_400_000 } as const
+export const QUANT_TIMEFRAMES = { '15m': 900_000, '1h': 3_600_000, '4h': 14_400_000 } as const
 export type Timeframe = keyof typeof QUANT_TIMEFRAMES
 
 /** Closed bars requested per timeframe (EMA50 needs 166, MACD signal 115). */
@@ -185,9 +185,9 @@ function backoffFor(err: unknown): number {
 /**
  * Cached candles of one symbol and timeframe. Returns the cached entry
  * (possibly stale) while blocked by a recent failure; throws only when there
- * is nothing cached.
+ * is nothing cached. Also used by technicalSummary.ts (1h, Task 009F).
  */
-async function loadCandles(symbol: string, timeframe: Timeframe, now: number): Promise<CandleEntry> {
+export async function loadCandles(symbol: string, timeframe: Timeframe, now: number): Promise<CandleEntry> {
   const key = `${symbol}:${timeframe}`
   const cached = candleCache.get(key)
   if (cached && now < cached.refreshAfter) return cached
