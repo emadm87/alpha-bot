@@ -332,7 +332,7 @@ test('7. open long, hold, close and open short all execute as before; the answer
   setPrices(76008.5)
   decision = { operation: 'open', symbol: 'BTC', direction: 'long', target_portion_of_balance: 0.5, leverage: 2, reason: 'open' }
   await placeAIDrivenCryptoOrder()
-  assert.equal(pos('BTC')!.quantity, Math.round((1000 * 0.5) / 76008.5 * 1e6) / 1e6, 'original sizing')
+  assert.equal(pos('BTC')!.quantity, Math.floor((1000 * 0.25) / 76008.5 * 1e6) / 1e6, 'sizing capped at 25% of the equity (009G)')
   setPrices(76100)
   decision = { operation: 'hold', reason: 'hold' }
   await placeAIDrivenCryptoOrder()

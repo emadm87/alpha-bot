@@ -175,7 +175,7 @@ test('4. memory: the reason that opened the position and the last decisions, in 
   prices()
   decision = { operation: 'open', symbol: 'BTC', direction: 'long', target_portion_of_balance: 0.5, leverage: 2, reason: 'breakout above the range ' + 'z'.repeat(400) }
   await placeAIDrivenCryptoOrder()
-  assert.equal(position(id, 'BTC')!.quantity, Math.round((1000 * 0.5) / 80000 * 1e6) / 1e6, 'size = cash x portion, unchanged')
+  assert.equal(position(id, 'BTC')!.quantity, Math.floor((1000 * 0.25) / 80000 * 1e6) / 1e6, 'size = cash x portion, capped at 25% of the equity (009G)')
   for (let k = 1; k <= 4; k++) {
     decision = { operation: 'hold', reason: `hold number ${k} ` + 'y'.repeat(300) }
     prices()

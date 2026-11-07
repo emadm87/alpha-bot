@@ -184,9 +184,9 @@ test('trace links prompt, response, decision and outcome by cycle id', async () 
   assert.equal(cycles.length, 4)
 
   const expected = [
-    ['executed', 'LONG BTC quantity=0.006147 leverage=3x'],
+    ['executed', 'LONG BTC quantity=0.003073 leverage=3x'],
     ['hold', 'No order placed'],
-    ['executed', 'SELL BTC quantity=0.006147 leverage=3x'],
+    ['executed', 'SELL BTC quantity=0.003073 leverage=3x'],
     ['rejected', 'No position available to close for ETH'],
   ]
   cycles.forEach((cycleId, i) => {

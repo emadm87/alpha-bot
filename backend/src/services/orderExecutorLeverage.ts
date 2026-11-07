@@ -20,6 +20,7 @@ import {
 } from '../db/schema.js'
 import { positionMargin } from './assetCalculator.js'
 import { getLastPrice } from './marketData.js'
+import { maxQuantityWithin } from './openCap.js'
 import { dbDateMs, utcNow } from '../utils/datetime.js'
 
 /** Calculate taker fee for CRYPTO market. */
@@ -100,6 +101,12 @@ export async function placeAndExecuteCrypto(params: {
   leverage?: number
   /** Order number to record; a random one when omitted. */
   orderNo?: string
+  /**
+   * 009G: largest notional (quantity x fill price) allowed for an open
+   * (LONG/SHORT); the quantity is reduced at the fill price to fit, or the
+   * open is refused. Ignored for closes; omitted by the other callers.
+   */
+  maxNotional?: number
 }): Promise<Order> {
   const {
     account,
@@ -107,10 +114,11 @@ export async function placeAndExecuteCrypto(params: {
     name,
     orderType,
     price,
-    quantity,
     leverage = 1,
     orderNo = randomUUID().replace(/-/g, '').slice(0, 16),
+    maxNotional,
   } = params
+  let quantity = params.quantity
   const side = params.side.toUpperCase()
 
   if (leverage < 1 || leverage > CRYPTO_MAX_LEVERAGE) {
@@ -129,6 +137,19 @@ export async function placeAndExecuteCrypto(params: {
     orderType === 'LIMIT' && price
       ? price
       : await getLastPrice(symbol, 'CRYPTO')
+
+  // 009G: the cap is checked at the fill price itself, after any price change since the decision
+  if (maxNotional !== undefined && !isClose) {
+    if (!Number.isFinite(maxNotional) || !(maxNotional > 0)) throw new Error(`Open refused: invalid notional cap ${maxNotional}`)
+    if (!Number.isFinite(execPrice) || !(execPrice > 0)) throw new Error(`Open refused: invalid fill price ${execPrice}`)
+    if (!Number.isFinite(execPrice * quantity)) throw new Error(`Open refused: notional not finite (quantity ${quantity})`)
+    if (execPrice * quantity > maxNotional) {
+      quantity = maxQuantityWithin(maxNotional, execPrice)
+      if (quantity < CRYPTO_MIN_ORDER_QUANTITY) {
+        throw new Error(`Open refused: at the fill price ${execPrice} the notional cap ${maxNotional} allows quantity ${quantity}, below the minimum ${CRYPTO_MIN_ORDER_QUANTITY}`)
+      }
+    }
+  }
 
   const notional = execPrice * quantity
   const takerFee = calcCryptoFee(notional)

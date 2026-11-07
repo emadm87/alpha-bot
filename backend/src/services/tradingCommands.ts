@@ -9,6 +9,7 @@ import { calcPositionsValue } from './assetCalculator.js'
 import { getLastPrice } from './marketData.js'
 import { checkAndExecuteOrder, createOrder } from './orderMatching.js'
 import { placeAndExecuteCrypto } from './orderExecutorLeverage.js'
+import { maxQuantityWithin, OPEN_NOTIONAL_CAP, verifiedEquity } from './openCap.js'
 import {
   callAIForDecision,
   getActiveAIAccounts,
@@ -243,6 +244,7 @@ export async function placeAIDrivenCryptoOrder(): Promise<void> {
 
         let quantity: number
         let side: string
+        let openCap: number | undefined
 
         if (operation === 'open') {
           // ONE position per coin rule
@@ -269,6 +271,32 @@ export async function placeAIDrivenCryptoOrder(): Promise<void> {
 
           const orderValue = account.currentCash * targetPortion
           quantity = round6(orderValue / price)
+
+          // 009G: notional of a new open <= 25% of the current equity, whatever the leverage
+          const eqv = await verifiedEquity(account.id)
+          if ('error' in eqv) {
+            const msg = `Open refused for ${symbol}: equity not verifiable (${eqv.error})`
+            logger.warning(`${msg} for ${account.name}`)
+            outcome('rejected', msg)
+            saveAIDecision(account, decision, portfolio, false)
+            continue
+          }
+          openCap = OPEN_NOTIONAL_CAP * eqv.equity
+          const requested = quantity * price
+          if (!Number.isFinite(requested)) {
+            const msg = `Open refused for ${symbol}: requested notional not finite (portion ${decision.target_portion_of_balance})`
+            logger.warning(`${msg} for ${account.name}`)
+            outcome('rejected', msg)
+            saveAIDecision(account, decision, portfolio, false)
+            continue
+          }
+          if (requested > openCap) quantity = maxQuantityWithin(openCap, price)
+          logger.info(
+            `Open cap ${account.name} ${symbol}: requested notional ${requested.toFixed(4)} (cash ${account.currentCash.toFixed(4)} x portion ${targetPortion}), ` +
+            `equity ${eqv.equity.toFixed(4)} (cash ${eqv.cash.toFixed(4)} + margin ${eqv.postedMargin.toFixed(4)} + unrealized ${eqv.unrealizedPnl.toFixed(4)}), ` +
+            `cap ${(OPEN_NOTIONAL_CAP * 100).toFixed(0)}% = ${openCap.toFixed(4)}, authorized notional ${(quantity * price).toFixed(4)} at ${price}` +
+            (requested > openCap ? ' (reduced; checked again at the fill price)' : ''),
+          )
 
           if (quantity <= 0) {
             logger.info(
@@ -348,9 +376,16 @@ export async function placeAIDrivenCryptoOrder(): Promise<void> {
             price: null,
             quantity,
             leverage,
+            maxNotional: openCap,
           })
           orderId = order.id
           executed = true
+          if (openCap !== undefined && order.quantity < quantity) {
+            logger.warning(
+              `Open cap ${account.name} ${symbol}: quantity reduced at the fill price ${order.price} from ${quantity} to ${order.quantity} (notional ${(order.quantity * (order.price ?? 0)).toFixed(4)} <= ${openCap.toFixed(4)})`,
+            )
+          }
+          quantity = order.quantity
           logger.info(
             `✅ AI order executed: account=${account.name} ${operation.toUpperCase()} ${direction.toUpperCase()} ${side} ${symbol} ${order.orderNo} quantity=${quantity} leverage=${leverage}x reason='${reason}'`,
           )

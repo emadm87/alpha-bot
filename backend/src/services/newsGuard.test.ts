@@ -76,7 +76,7 @@ test('2. open, hold and close all still execute: nothing is forced', async () =>
   prices(76008.5)
   decision = { operation: 'open', symbol: 'BTC', direction: 'long', target_portion_of_balance: 0.5, leverage: 2, reason: 'open' }
   await placeAIDrivenCryptoOrder()
-  assert.equal(btc()!.quantity, Math.round((1000 * 0.5) / 76008.5 * 1e6) / 1e6, 'open with the original sizing')
+  assert.equal(btc()!.quantity, Math.floor((1000 * 0.25) / 76008.5 * 1e6) / 1e6, 'open: 50% asked, capped at 25% of the equity (009G)')
   prices(76100)
   decision = { operation: 'hold', reason: 'hold' }
   await placeAIDrivenCryptoOrder()

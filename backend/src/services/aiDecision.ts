@@ -17,6 +17,7 @@ import { recordAICycle } from './aiDiagnostics.js'
 import { fetchLatestNews } from './newsFeed.js'
 import { getLastPrice } from './marketData.js'
 import { technicalSection } from './technicalSummary.js'
+import { OPEN_NOTIONAL_CAP } from './openCap.js'
 import { MEMORY_LIMITS, positionMemory, positionState, type PositionMemory, type PositionState } from './positionState.js'
 import { getLogger } from '../utils/logger.js'
 
@@ -152,6 +153,7 @@ Rules:
   - direction: "long" or "short"
   - target_portion_of_balance: % of available cash to use (0.0-1.0)
   - leverage: leverage multiplier (1-10, higher = more risk/reward)
+  - engine limit: the notional of a new open (quantity x fill price) is capped at ${OPEN_NOTIONAL_CAP * 100}% of the current account equity, whatever the leverage (the margin is notional / leverage); a larger target_portion_of_balance is reduced by the engine
 - For "close": Close an existing position
   - symbol: which coin position to close
   - direction: must match the position side you want to close ("long" or "short")
